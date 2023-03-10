@@ -1,0 +1,42 @@
+#!/bin/bash
+
+GIT_ROOT="$(git rev-parse --show-toplevel)"
+LINT_VERSION="v1.50.1"
+LINT_BIN="${OVERRIDE_LINT_BIN:-"$GIT_ROOT/.golangci-lint"}"
+GOIF_VERSION="v1.0.8"
+GOIF_BIN="${OVERRIDE_GOIF_BIN:-"$GIT_ROOT/.go-oif"}"
+
+set -e
+
+if [ ! -f "$LINT_BIN" ]; then
+    echo "Downloading dependencies (golangci-lint)..."
+    curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$GIT_ROOT" "$LINT_VERSION"
+    mv "$GIT_ROOT/golangci-lint" "$LINT_BIN"
+fi
+
+if [ ! -f "$GOIF_BIN" ]; then
+    echo "Downloading dependencies (go-oif)..."
+    curl -sSfL https://raw.githubusercontent.com/heyvito/go-oif/main/install.sh | sh -s -- -b "$GIT_ROOT" "$GOIF_VERSION"
+    mv "$GIT_ROOT/go-oif" "$GOIF_BIN"
+fi
+
+echo "  Running formatter (go-oif)..."
+"$GOIF_BIN" ./...
+echo "  Running linter (golangci-lint)..."
+"$LINT_BIN" run \
+    -E gosec \
+    -E prealloc \
+    -E exportloopref \
+    -E misspell \
+    -E nestif \
+    -E depguard \
+    -E goimports \
+    -E prealloc \
+    -E unconvert \
+    -E noctx \
+    -E gosimple \
+    -E govet \
+    -E ineffassign \
+    -E staticcheck \
+    -E unused \
+    -E asasalint
