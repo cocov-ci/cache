@@ -11,8 +11,10 @@ require (
 	github.com/go-chi/chi/v5 v5.0.8
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.3.0
+	github.com/heyvito/go-leader v0.1.0
 	github.com/heyvito/httptest-go v0.0.2
 	github.com/heyvito/redlock-go v0.0.2
+	github.com/levigross/grequests v0.0.0-20221222020224-9eee758d18d5
 	github.com/redis/go-redis/v9 v9.0.2
 	github.com/stretchr/testify v1.8.2
 	github.com/urfave/cli/v2 v2.24.4
@@ -38,11 +40,13 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
+	golang.org/x/net v0.0.0-20210405180319-a5a99cb37ef4 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

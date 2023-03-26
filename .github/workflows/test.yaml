@@ -4,22 +4,22 @@ on:
 
 jobs:
   test:
+    strategy:
+      matrix:
+        kind: [unit, integration]
+
     runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:alpine
-        ports:
-          - "6379:6379"
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+
       - uses: actions/setup-go@v3
         with:
           go-version: 'stable'
-      - name: Start local MinIO server
-        run: docker run -d -p 9000:9000 --name minio minio/minio server /data
+
       - name: Run tests
-        run: go test ./...
+        run: script/full-test ${{ matrix.kind }}
+
   build:
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest

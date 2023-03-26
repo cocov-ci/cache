@@ -11,9 +11,9 @@ mkdir mocks
 function gen() {
   path="$1"
   filename="$(basename "$path")"
-  mockgen -package=mocks -source="$path" > "mocks/${filename%.*}_mocks.go"
+  mockgen -package=mocks -source="$path" -mock_names "$2" > "mocks/${filename%.*}_mocks.go"
 }
 
-gen "storage/provider.go"
-gen "redis/redis.go"
+gen "storage/provider.go" "Provider=MockProvider"
+gen "redis/redis.go" "Client=MockRedisClient"
 mockgen -package=mocks "github.com/heyvito/redlock-go" Redlock > "mocks/redlock-go_mocks.go"

@@ -1,32 +1,37 @@
+//go:build unit
+
 package storage
 
 import (
-	"bytes"
-	"io"
+	"github.com/cocov-ci/cache/api"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestLocal(t *testing.T) {
+func makeLocalClient(t *testing.T) (string, Provider) {
 	tmpDir, err := os.MkdirTemp("", "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
 
-	fileContents := "this is a test"
-	fileLocator := ArtifactDescriptor("cache", "foobar")
+	apiURL := os.Getenv("API_URL")
+	if len(apiURL) == 0 {
+		apiURL = "http://localhost:3000"
+	}
+	apiToken := os.Getenv("API_TOKEN")
+	apiClient := api.New(apiURL, apiToken)
 
-	var client Provider
+	c, err := NewLocalStorage(tmpDir, apiClient)
+	require.NoError(t, err)
 
-	// Should create required directories
+	return tmpDir, c
+}
+
+func TestLocal(t *testing.T) {
 	t.Run("initialize", func(t *testing.T) {
-		client, err = NewLocalStorage(tmpDir)
-		require.NoError(t, err)
-
+		tmpDir, _ := makeLocalClient(t)
 		stat, err := os.Stat(filepath.Join(tmpDir, "tool-cache"))
 		require.NoError(t, err)
 		assert.True(t, stat.IsDir())
@@ -37,71 +42,67 @@ func TestLocal(t *testing.T) {
 	})
 
 	t.Run("set artifact", func(t *testing.T) {
-		data := []byte(fileContents)
-		dataReader := bytes.NewReader(data)
-		readerCloser := io.NopCloser(dataReader)
-
-		err = client.Set(fileLocator, "text/plain", len(data), readerCloser)
-		require.NoError(t, err)
+		tmpDir, provider := makeLocalClient(t)
+		testSetArtifact(t, provider, func(t *testing.T) int {
+			return countFiles(t, tmpDir)
+		})
 	})
 
 	t.Run("read artifact", func(t *testing.T) {
-		meta, reader, err := client.Get(fileLocator)
-		require.NoError(t, err)
-		assert.Equal(t, len(fileContents), meta.Size)
-		assert.Equal(t, "text/plain", meta.Mime)
-		assert.InDelta(t, time.Now().UTC().Unix(), meta.CreatedAt.Unix(), 10)
-		assert.InDelta(t, time.Now().UTC().Unix(), meta.AccessedAt.Unix(), 10)
-
-		data, err := io.ReadAll(reader)
-		_ = reader.Close()
-		require.NoError(t, err)
-
-		assert.Equal(t, fileContents, string(data))
+		_, provider := makeLocalClient(t)
+		testReadArtifact(t, provider)
 	})
 
 	t.Run("read artifact (not found)", func(t *testing.T) {
-		meta, reader, err := client.Get(ArtifactDescriptor("cache", "foobars"))
-		assert.Nil(t, meta)
-		assert.Nil(t, reader)
-		assert.ErrorAs(t, err, &ErrNotExist{})
+		_, provider := makeLocalClient(t)
+		testArtifactNotFound(t, provider)
 	})
 
-	t.Run("touch", func(t *testing.T) {
-		currentMeta, err := client.MetadataOf(fileLocator)
-		require.NoError(t, err)
-
-		err = client.Touch(fileLocator)
-		require.NoError(t, err)
-
-		newMeta, err := client.MetadataOf(fileLocator)
-		require.NoError(t, err)
-
-		assert.Equal(t, currentMeta.CreatedAt, newMeta.CreatedAt)
-		assert.NotEqual(t, currentMeta.AccessedAt, newMeta.AccessedAt)
+	t.Run("touch artifact", func(t *testing.T) {
+		_, provider := makeLocalClient(t)
+		testArtifactTouch(t, provider)
 	})
 
-	t.Run("total size", func(t *testing.T) {
-		size, err := client.TotalSize(KindArtifact)
-		require.NoError(t, err)
-		assert.Equal(t, int64(len(fileContents)), size)
+	t.Run("delete artifact", func(t *testing.T) {
+		tmpDir, provider := makeLocalClient(t)
+		testArtifactDelete(t, provider, func(t *testing.T) int {
+			return countFiles(t, tmpDir)
+		})
 	})
 
-	t.Run("delete", func(t *testing.T) {
-		err = client.Delete(fileLocator)
-		assert.NoError(t, err)
-
-		read, err := os.ReadDir(filepath.Join(tmpDir, "artifacts", fileLocator.groupPath()))
-		assert.NoError(t, err)
-		assert.Empty(t, read)
+	t.Run("purge repository", func(t *testing.T) {
+		tmpDir, provider := makeLocalClient(t)
+		testPurgeRepository(t, provider, func(t *testing.T) int {
+			return countFiles(t, tmpDir)
+		})
 	})
 
-	t.Run("delete group", func(t *testing.T) {
-		err = client.DeleteGroup(ArtifactParentDescriptor("cache"))
-		assert.NoError(t, err)
+	t.Run("set tool", func(t *testing.T) {
+		tmpDir, provider := makeLocalClient(t)
+		testSetTool(t, provider, func(t *testing.T) int {
+			return countFiles(t, tmpDir)
+		})
+	})
 
-		read, err := os.ReadDir(filepath.Join(tmpDir, "artifacts"))
-		assert.NoError(t, err)
-		assert.Empty(t, read)
+	t.Run("read tool", func(t *testing.T) {
+		_, provider := makeLocalClient(t)
+		testReadTool(t, provider)
+	})
+
+	t.Run("read tool (not found)", func(t *testing.T) {
+		_, provider := makeLocalClient(t)
+		testToolNotFound(t, provider)
+	})
+
+	t.Run("touch tool", func(t *testing.T) {
+		_, provider := makeLocalClient(t)
+		testToolTouch(t, provider)
+	})
+
+	t.Run("delete tool", func(t *testing.T) {
+		tmpDir, provider := makeLocalClient(t)
+		testToolDelete(t, provider, func(t *testing.T) int {
+			return countFiles(t, tmpDir)
+		})
 	})
 }

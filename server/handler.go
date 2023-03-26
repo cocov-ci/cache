@@ -2,11 +2,12 @@ package server
 
 import (
 	"fmt"
+	"github.com/cocov-ci/cache/locator"
 	"io"
 	"net/http"
+	"reflect"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
 	"github.com/cocov-ci/cache/logging"
@@ -15,28 +16,25 @@ import (
 )
 
 type AuthenticatorFunc func(r *http.Request) error
-type DescriptorFunc func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error)
 
-type Handler struct {
-	Authenticator    AuthenticatorFunc
-	LocatorGenerator DescriptorFunc
-	MaxPackageSize   int64
-	Provider         storage.Provider
-	Redis            redis.Client
+type Handler[L locator.Locator] struct {
+	Authenticator  AuthenticatorFunc
+	MaxPackageSize int64
+	Redis          redis.Client
+
+	HandleGet  func(loc L, r *http.Request) (size int64, mime string, stream io.ReadCloser, err error)
+	HandleHead func(loc L, r *http.Request) (size int64, mime string, err error)
+	HandleSet  func(loc L, mime string, size int64, stream io.ReadCloser) error
 }
 
-func (h *Handler) GetRepoName(r *http.Request) (string, error) {
-	ok, val, err := h.Redis.RepoNameFromJID(r.Header.Get("Cocov-Job-ID"))
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		val = ""
-	}
-	return val, nil
+func (h *Handler[L]) makeLocator() L {
+	var rawLocator L
+	t := reflect.TypeOf(rawLocator)
+	i := reflect.New(t.Elem())
+	return i.Interface().(L)
 }
 
-func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
+func (h *Handler[L]) Get(w http.ResponseWriter, r *http.Request) {
 	log := logging.GetLogger(r)
 
 	if r.Header.Get("Cocov-Job-ID") == "" {
@@ -55,29 +53,29 @@ func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	itemKey := chi.URLParam(r, "id")
-	if itemKey == "" {
-		log.Error("Rejecting request lacking id")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte("Missing ID"))
-		return
-	}
-
-	locator, err := h.LocatorGenerator(h, r, itemKey)
-	if err != nil {
-		log.Error("Rejecting request due to error returned from LocatorGenerator", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("Internal server error"))
+	var loc = h.makeLocator()
+	if err := loc.LoadFrom(h.Redis, r); err != nil {
+		if httpErr, ok := err.(locator.HTTPError); ok {
+			log.Error("Locator rejecting with custom HTTP error", zap.Error(httpErr))
+			w.WriteHeader(httpErr.Status)
+			_, _ = w.Write([]byte(httpErr.Message))
+		} else {
+			log.Error("Rejecting request due to error returned from locator", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("Internal server error"))
+		}
 		return
 	}
 
 	var (
-		meta   *storage.Item
+		mime   string
+		size   int64
 		reader io.ReadCloser
+		err    error
 	)
 
-	err = h.Redis.Locking(locator.PathComponents(), 10*time.Minute, func() error {
-		meta, reader, err = h.Provider.Get(locator)
+	err = h.Redis.Locking(loc.LockKey(), 10*time.Minute, func() error {
+		size, mime, reader, err = h.HandleGet(loc, r)
 		return err
 	})
 
@@ -96,8 +94,8 @@ func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
 
 	defer func() { _ = reader.Close() }()
 
-	w.Header().Set("Content-Type", meta.Mime)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.Size))
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 
 	_, err = io.Copy(w, reader)
 	if err != nil {
@@ -105,7 +103,7 @@ func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) HandleHead(w http.ResponseWriter, r *http.Request) {
+func (h *Handler[L]) Head(w http.ResponseWriter, r *http.Request) {
 	log := logging.GetLogger(r)
 
 	if r.Header.Get("Cocov-Job-ID") == "" {
@@ -122,47 +120,50 @@ func (h *Handler) HandleHead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	itemKey := chi.URLParam(r, "id")
-	if itemKey == "" {
-		log.Error("Rejecting request lacking id")
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	locator, err := h.LocatorGenerator(h, r, itemKey)
-	if err != nil {
-		log.Error("Rejecting request due to error returned from LocatorGenerator", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
+	loc := h.makeLocator()
+	if err := loc.LoadFrom(h.Redis, r); err != nil {
+		if httpErr, ok := err.(locator.HTTPError); ok {
+			log.Error("Locator rejecting with custom HTTP error", zap.Error(httpErr))
+			w.WriteHeader(httpErr.Status)
+			_, _ = w.Write([]byte(httpErr.Message))
+		} else {
+			log.Error("Rejecting request due to error returned from locator", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("Internal server error"))
+		}
 		return
 	}
 
 	var (
-		meta *storage.Item
+		mime string
+		size int64
+		err  error
 	)
 
-	err = h.Redis.Locking(locator.PathComponents(), 10*time.Minute, func() error {
-		meta, err = h.Provider.MetadataOf(locator)
+	err = h.Redis.Locking(loc.LockKey(), 10*time.Minute, func() error {
+		size, mime, err = h.HandleHead(loc, r)
 		return err
 	})
 
 	if err != nil {
 		if _, ok := err.(storage.ErrNotExist); ok {
 			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("Not found"))
 			return
 		}
 
 		log.Error("Rejecting request due to error returned during Locking + Item processing procedure", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("Internal server error"))
 		return
 	}
 
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", meta.Size))
-	w.Header().Set("Content-Type", meta.Mime)
-
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.WriteHeader(http.StatusOK)
 }
 
-func (h *Handler) HandleSet(w http.ResponseWriter, r *http.Request) {
+func (h *Handler[L]) Set(w http.ResponseWriter, r *http.Request) {
 	log := logging.GetLogger(r)
 
 	if r.Header.Get("Cocov-Job-ID") == "" {
@@ -196,6 +197,14 @@ func (h *Handler) HandleSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	itemName := r.Header.Get("Filename")
+	if itemName == "" {
+		log.Error("Rejecting request lacking filename")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Missing Filename"))
+		return
+	}
+
 	if h.MaxPackageSize != 0 {
 		if r.ContentLength > h.MaxPackageSize {
 			log.Error("Request body is larger than the maximum configured value",
@@ -207,26 +216,23 @@ func (h *Handler) HandleSet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	itemKey := chi.URLParam(r, "id")
-	if itemKey == "" {
-		log.Error("Rejecting request lacking id")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte("Missing ID"))
-
+	loc := h.makeLocator()
+	if err := loc.LoadFrom(h.Redis, r); err != nil {
+		if httpErr, ok := err.(locator.HTTPError); ok {
+			log.Error("Locator rejecting with custom HTTP error", zap.Error(httpErr))
+			w.WriteHeader(httpErr.Status)
+			_, _ = w.Write([]byte(httpErr.Message))
+		} else {
+			log.Error("Rejecting request due to error returned from locator", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("Internal server error"))
+		}
 		return
 	}
 
-	locator, err := h.LocatorGenerator(h, r, itemKey)
-	if err != nil {
-		log.Error("Rejecting request due to error returned from LocatorGenerator", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("Internal server error"))
-		return
-	}
-
-	err = h.Redis.Locking(locator.PathComponents(), 10*time.Minute, func() error {
+	err := h.Redis.Locking(loc.LockKey(), 10*time.Minute, func() error {
 		defer func(body io.ReadCloser) { _ = body.Close() }(r.Body)
-		return h.Provider.Set(locator, contentType, int(r.ContentLength), io.NopCloser(io.LimitReader(r.Body, r.ContentLength)))
+		return h.HandleSet(loc, contentType, r.ContentLength, io.NopCloser(io.LimitReader(r.Body, r.ContentLength)))
 	})
 
 	if err != nil {

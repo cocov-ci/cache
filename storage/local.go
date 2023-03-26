@@ -1,14 +1,13 @@
 package storage
 
 import (
-	"encoding/json"
 	"fmt"
+	"github.com/cocov-ci/cache/api"
+	"github.com/cocov-ci/cache/locator"
+	"go.uber.org/zap"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 )
 
 func ensureDir(at string) error {
@@ -33,7 +32,7 @@ func ensureDir(at string) error {
 	}
 }
 
-func NewLocalStorage(basePath string) (Provider, error) {
+func NewLocalStorage(basePath string, client api.Client) (Provider, error) {
 	basePath, err := filepath.Abs(basePath)
 	if err != nil {
 		return nil, err
@@ -50,9 +49,11 @@ func NewLocalStorage(basePath string) (Provider, error) {
 	}
 
 	return LocalStorage{
+		log:          zap.L().With(zap.String("component", "LocalStorage")),
 		basePath:     basePath,
 		toolPath:     toolPath,
 		artifactPath: artifactPath,
+		api:          client,
 	}, nil
 }
 
@@ -60,224 +61,277 @@ type LocalStorage struct {
 	basePath     string
 	toolPath     string
 	artifactPath string
+	api          api.Client
+	log          *zap.Logger
 }
 
-func (l LocalStorage) pathOf(locator ObjectDescriptor) string {
-	components := make([]string, 1, 3)
-	if locator.kind() == KindArtifact {
-		components[0] = l.artifactPath
-	} else {
-		components[0] = l.toolPath
-	}
-	components = append(components, locator.PathComponents()...)
-
-	return filepath.Join(components...)
+func (l LocalStorage) GetArtifactMeta(locator *locator.ArtifactLocator) (*api.GetArtifactMetaOutput, error) {
+	return l.api.GetArtifactMeta(api.GetArtifactMetaInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "local",
+	})
 }
 
-func (l LocalStorage) basePathOf(k Kind) string {
-	if k == KindArtifact {
-		return l.artifactPath
-	}
-
-	return l.toolPath
+func (l LocalStorage) groupPath(repoID int64) (string, error) {
+	path := filepath.Join(l.artifactPath, fmt.Sprintf("%d", repoID))
+	err := os.MkdirAll(path, 0755)
+	return path, err
 }
 
-func (l LocalStorage) groupPath(locator ObjectDescriptor) string {
-	components := make([]string, 1, 2)
-	components[0] = l.basePathOf(locator.kind())
-
-	components = append(components, locator.groupPath())
-	return filepath.Join(components...)
+func (l LocalStorage) makeToolPath(toolID int64) string {
+	return filepath.Join(l.toolPath, fmt.Sprintf("%d", toolID))
 }
 
-func burninate(path string) {
-	_ = os.RemoveAll(path + ".meta")
-	_ = os.RemoveAll(path)
+func (l LocalStorage) makeArtifactPath(id, repoID int64) (string, error) {
+	groupPath, err := l.groupPath(repoID)
+	return filepath.Join(groupPath, fmt.Sprintf("%d", id)), err
 }
 
-func ensureConsistencyOf(path string) (*Item, error) {
-	metaFilePath := path + ".meta"
-	metaStat, err := os.Stat(metaFilePath)
-	if os.IsNotExist(err) {
-		_ = os.Remove(path)
-		return nil, nil
+func (l LocalStorage) GetArtifact(locator *locator.ArtifactLocator) (*api.GetArtifactMetaOutput, io.ReadCloser, error) {
+	meta, err := l.api.GetArtifactMeta(api.GetArtifactMetaInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "local",
+	})
+	if api.IsNotFound(err) {
+		return nil, nil, ErrNotExist{}
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	if metaStat.IsDir() {
-		burninate(path)
-		return nil, nil
-	}
-
-	var meta Item
-	f, err := os.Open(metaFilePath)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	if err = json.NewDecoder(f).Decode(&meta); err != nil {
-		burninate(path)
-		return nil, nil
-	}
-
-	return &meta, nil
-}
-
-func writeMeta(target string, meta *Item) error {
-	m, err := os.OpenFile(target+".meta", os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0655)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = m.Close() }()
-
-	if err = json.NewEncoder(m).Encode(meta); err != nil {
-		return err
-	}
-
-	if err = m.Sync(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (l LocalStorage) MetadataOf(locator ObjectDescriptor) (*Item, error) {
-	p := l.pathOf(locator)
-	meta, err := ensureConsistencyOf(p)
-	if err != nil {
-		return nil, err
-	}
-	if meta == nil {
-		return nil, ErrNotExist{path: p}
-	}
-
-	return meta, nil
-}
-
-func (l LocalStorage) Get(locator ObjectDescriptor) (*Item, io.ReadCloser, error) {
-	meta, err := l.MetadataOf(locator)
+	objPath, err := l.makeArtifactPath(meta.ID, locator.RepositoryID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	f, err := os.Open(l.pathOf(locator))
-	if err != nil {
+	stream, err := os.Open(objPath)
+	if os.IsNotExist(err) {
+		return nil, nil, ErrNotExist{}
+	} else if err != nil {
 		return nil, nil, err
 	}
 
-	return meta, f, nil
+	return meta, stream, nil
 }
 
-func (l LocalStorage) Set(locator ObjectDescriptor, mime string, objectSize int, stream io.ReadCloser) error {
-	meta := Item{
-		CreatedAt:  time.Now().UTC(),
-		AccessedAt: time.Now().UTC(),
-		Size:       objectSize,
-		Mime:       mime,
-	}
-	target := l.pathOf(locator)
+func (l LocalStorage) SetArtifact(locator *locator.ArtifactLocator, mime string, objectSize int64, stream io.ReadCloser) error {
+	defer func() { _ = stream.Close() }()
 
-	err := ensureDir(filepath.Dir(target))
+	meta, err := l.api.RegisterArtifact(api.RegisterArtifactInput{
+		RepositoryID: locator.RepositoryID,
+		Name:         locator.Name,
+		NameHash:     locator.NameHash,
+		Size:         objectSize,
+		Mime:         mime,
+		Engine:       "local",
+	})
 	if err != nil {
+
 		return err
 	}
 
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0655)
+	deleteArgs := api.DeleteArtifactInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "local",
+	}
+
+	objPath, err := l.makeArtifactPath(meta.ID, locator.RepositoryID)
 	if err != nil {
+		l.log.Error("Failed creating artifact path", zap.Error(err), zap.Int64("repositoryID", locator.RepositoryID), zap.Int64("itemID", meta.ID))
+		if delErr := l.api.DeleteArtifact(deleteArgs); delErr != nil {
+			l.log.Error("Failed removing item from API", zap.Error(err))
+		}
 		return err
 	}
+
+	f, err := os.OpenFile(objPath, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0644)
+	if err != nil {
+		l.log.Error("Failed opening item path for write", zap.Error(err), zap.Int64("repositoryID", locator.RepositoryID), zap.Int64("itemID", meta.ID), zap.String("path", objPath))
+		if delErr := l.api.DeleteArtifact(deleteArgs); delErr != nil {
+			l.log.Error("Failed removing item from API", zap.Error(err))
+		}
+		return err
+	}
+
 	defer func() { _ = f.Close() }()
 
 	_, err = io.Copy(f, stream)
 	if err != nil {
-		burninate(target)
+		l.log.Error("Failed streaming data into local fs", zap.Error(err))
+		if delErr := l.api.DeleteArtifact(deleteArgs); delErr != nil {
+			l.log.Error("Failed removing item from API", zap.Error(err))
+		}
 		return err
 	}
 
 	if err = f.Sync(); err != nil {
-		burninate(target)
-		return err
-	}
-
-	if err = writeMeta(target, &meta); err != nil {
-		burninate(target)
+		l.log.Error("Error syncing file descriptor", zap.Error(err))
+		if delErr := l.api.DeleteArtifact(deleteArgs); delErr != nil {
+			l.log.Error("Failed removing item from API", zap.Error(err))
+		}
 		return err
 	}
 
 	return nil
 }
 
-func (l LocalStorage) Touch(locator ObjectDescriptor) error {
-	p := l.pathOf(locator)
-	m, err := l.MetadataOf(locator)
-	if err != nil {
-		return err
-	}
-	m.AccessedAt = time.Now().UTC()
-	return writeMeta(p, m)
-}
-
-func (l LocalStorage) Delete(locator ObjectDescriptor) error {
-	p := l.pathOf(locator)
-	_, err := l.MetadataOf(locator)
-	if err != nil {
-		return err
-	}
-	burninate(p)
-	return nil
-}
-
-func (l LocalStorage) DeleteGroup(locator ObjectDescriptor) error {
-	p := l.pathOf(locator)
-	if !locator.groupable() {
-		return ErrNotGroupable{path: p}
-	}
-
-	return os.RemoveAll(l.groupPath(locator))
-}
-
-func (l LocalStorage) TotalSize(kind Kind) (int64, error) {
-	startPath := l.basePathOf(kind)
-	var size int64 = 0
-
-	ch := make(chan string, 10)
-	processorDone := make(chan error)
-	go func() {
-		for p := range ch {
-			f, err := os.Open(p)
-			if err != nil {
-				continue
-			}
-			var meta Item
-			if err = json.NewDecoder(f).Decode(&meta); err != nil {
-				_ = f.Close()
-				continue
-			}
-			_ = f.Close()
-			size += int64(meta.Size)
-		}
-		close(processorDone)
-	}()
-
-	err := filepath.WalkDir(startPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if strings.HasSuffix(d.Name(), ".meta") {
-			ch <- path
-		}
-		return nil
+func (l LocalStorage) TouchArtifact(locator *locator.ArtifactLocator) error {
+	return l.api.TouchArtifact(api.TouchArtifactInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "local",
 	})
-	close(ch)
-	if err != nil {
-		return 0, err
+}
+
+func (l LocalStorage) DeleteArtifact(locator *locator.ArtifactLocator) error {
+	meta, err := l.api.GetArtifactMeta(api.GetArtifactMetaInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "local",
+	})
+	if api.IsNotFound(err) {
+		return nil
 	}
 
-	<-processorDone
-	return size, nil
+	objPath, err := l.makeArtifactPath(meta.ID, locator.RepositoryID)
+	if err != nil {
+		l.log.Error("Failed creating artifact path", zap.Error(err), zap.Int64("repositoryID", locator.RepositoryID), zap.Int64("itemID", meta.ID))
+		return err
+	}
+
+	if err = os.Remove(objPath); err != nil {
+		return err
+	}
+
+	return l.api.DeleteArtifact(api.DeleteArtifactInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "local",
+	})
+}
+
+func (l LocalStorage) PurgeRepository(id int64) error {
+	// Worst case scenario we will have created a directory to immediately
+	// delete it afterwards.
+	gp, err := l.groupPath(id)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(gp)
+}
+
+func (l LocalStorage) GetToolMeta(locator *locator.ToolLocator) (*api.GetToolMetaOutput, error) {
+	return l.api.GetToolMeta(api.GetToolMetaInput{
+		NameHash: locator.NameHash,
+		Engine:   "local",
+	})
+}
+
+func (l LocalStorage) GetTool(locator *locator.ToolLocator) (*api.GetToolMetaOutput, io.ReadCloser, error) {
+	meta, err := l.api.GetToolMeta(api.GetToolMetaInput{
+		NameHash: locator.NameHash,
+		Engine:   "local",
+	})
+	if api.IsNotFound(err) {
+		return nil, nil, ErrNotExist{}
+	} else if err != nil {
+		return nil, nil, err
+	}
+
+	objPath := l.makeToolPath(meta.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	stream, err := os.Open(objPath)
+	if os.IsNotExist(err) {
+		return nil, nil, ErrNotExist{}
+	} else if err != nil {
+		return nil, nil, err
+	}
+
+	return meta, stream, nil
+}
+
+func (l LocalStorage) SetTool(locator *locator.ToolLocator, mime string, objectSize int64, stream io.ReadCloser) error {
+	defer func() { _ = stream.Close() }()
+
+	meta, err := l.api.RegisterTool(api.RegisterToolInput{
+		Name:     locator.Name,
+		NameHash: locator.NameHash,
+		Size:     objectSize,
+		Mime:     mime,
+		Engine:   "local",
+	})
+	if err != nil {
+
+		return err
+	}
+
+	deleteArgs := api.DeleteToolInput{
+		NameHash: locator.NameHash,
+		Engine:   "local",
+	}
+
+	objPath := l.makeToolPath(meta.ID)
+
+	f, err := os.OpenFile(objPath, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0644)
+	if err != nil {
+		l.log.Error("Failed opening tool path for write", zap.Error(err), zap.Int64("toolID", meta.ID), zap.String("path", objPath))
+		if delErr := l.api.DeleteTool(deleteArgs); delErr != nil {
+			l.log.Error("Failed removing tool from API", zap.Error(err))
+		}
+		return err
+	}
+
+	defer func() { _ = f.Close() }()
+
+	_, err = io.Copy(f, stream)
+	if err != nil {
+		l.log.Error("Failed streaming data into local fs", zap.Error(err))
+		if delErr := l.api.DeleteTool(deleteArgs); delErr != nil {
+			l.log.Error("Failed removing tool from API", zap.Error(err))
+		}
+		return err
+	}
+
+	if err = f.Sync(); err != nil {
+		l.log.Error("Error syncing file descriptor", zap.Error(err))
+		if delErr := l.api.DeleteTool(deleteArgs); delErr != nil {
+			l.log.Error("Failed removing tool from API", zap.Error(err))
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (l LocalStorage) TouchTool(locator *locator.ToolLocator) error {
+	return l.api.TouchTool(api.TouchToolInput{
+		NameHash: locator.NameHash,
+		Engine:   "local",
+	})
+}
+
+func (l LocalStorage) DeleteTool(locator *locator.ToolLocator) error {
+	meta, err := l.api.GetToolMeta(api.GetToolMetaInput{
+		NameHash: locator.NameHash,
+		Engine:   "local",
+	})
+	if api.IsNotFound(err) {
+		return nil
+	}
+
+	objPath := l.makeToolPath(meta.ID)
+
+	if err = os.Remove(objPath); err != nil {
+		return err
+	}
+
+	return l.api.DeleteTool(api.DeleteToolInput{
+		NameHash: locator.NameHash,
+		Engine:   "local",
+	})
 }

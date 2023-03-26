@@ -2,6 +2,9 @@ package server
 
 import (
 	"fmt"
+	"github.com/cocov-ci/cache/api"
+	"github.com/cocov-ci/cache/locator"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -22,37 +25,40 @@ type Config struct {
 	RedisClient      redis.Client
 }
 
-func (c *Config) MakeProvider() (*Provider, error) {
-	prov, err := c.storageProvider()
+func (c *Config) authenticator(r *http.Request) error {
+	id, err := c.RedisClient.RepoDataFromJID(r.Header.Get("Cocov-Job-ID"))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	authenticator := func(r *http.Request) error {
-		ok, repoName, err := c.RedisClient.RepoNameFromJID(r.Header.Get("Cocov-Job-ID"))
-		if err != nil {
-			return err
-		}
+	if id == nil {
+		return fmt.Errorf("invalid or expired job id")
+	}
 
-		if !ok || repoName == "" {
-			return fmt.Errorf("invalid or expired job id")
-		}
+	return nil
+}
 
-		return nil
+func (c *Config) MakeProvider(apiClient api.Client) (*Provider, error) {
+	prov, err := c.storageProvider(apiClient)
+	if err != nil {
+		return nil, err
 	}
 
 	srv := &Provider{
 		Logger:          c.Logger,
 		StorageProvider: prov,
 		Redis:           c.RedisClient,
-		Authenticator:   authenticator,
+		Authenticator:   c.authenticator,
 		MaxPackageSize:  c.MaxPackageSize,
 	}
+
+	srv.artifactHandler = MakeArtifactHandler(c, prov)
+	srv.toolsHandler = MakeToolsHandler(c, prov)
 
 	return srv, nil
 }
 
-func (c *Config) storageProvider() (storage.Provider, error) {
+func (c *Config) storageProvider(apiClient api.Client) (storage.Provider, error) {
 	var (
 		provider        storage.Provider
 		storageLogField zap.Field
@@ -60,11 +66,11 @@ func (c *Config) storageProvider() (storage.Provider, error) {
 	)
 
 	if c.StorageMode == "local" {
-		provider, err = storage.NewLocalStorage(c.LocalStoragePath)
+		provider, err = storage.NewLocalStorage(c.LocalStoragePath, apiClient)
 		storageLogField = zap.String("local_storage_path", c.LocalStoragePath)
 
 	} else {
-		provider, err = storage.NewS3(c.S3BucketName)
+		provider, err = storage.NewS3(c.S3BucketName, apiClient)
 		storageLogField = zap.String("bucket_name", c.S3BucketName)
 	}
 
@@ -87,63 +93,74 @@ type Provider struct {
 	Redis           redis.Client
 	Authenticator   AuthenticatorFunc
 	MaxPackageSize  int64
+	artifactHandler Handler[*locator.ArtifactLocator]
+	toolsHandler    Handler[*locator.ToolLocator]
 }
 
-func (p *Provider) makeArtifactHandler() *Handler {
-	return &Handler{
-		Authenticator: p.Authenticator,
-		LocatorGenerator: func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			ok, repoName, err := h.Redis.RepoNameFromJID(r.Header.Get("Cocov-Job-ID"))
+func MakeArtifactHandler(c *Config, p storage.Provider) Handler[*locator.ArtifactLocator] {
+	return Handler[*locator.ArtifactLocator]{
+		Authenticator:  c.authenticator,
+		MaxPackageSize: c.MaxPackageSize,
+		Redis:          c.RedisClient,
+		HandleGet: func(loc *locator.ArtifactLocator, r *http.Request) (size int64, mime string, stream io.ReadCloser, err error) {
+			meta, stream, err := p.GetArtifact(loc)
 			if err != nil {
-				return nil, err
+				return 0, "", nil, err
 			}
 
-			if !ok || repoName == "" {
-				return nil, fmt.Errorf("invalid or expired job id")
-			}
-
-			return storage.ArtifactDescriptor(repoName, id), nil
+			return meta.Size, meta.Mime, stream, err
 		},
-		MaxPackageSize: p.MaxPackageSize,
-		Provider:       p.StorageProvider,
-		Redis:          p.Redis,
+		HandleHead: func(loc *locator.ArtifactLocator, r *http.Request) (size int64, mime string, err error) {
+			meta, err := p.GetArtifactMeta(loc)
+			if err != nil {
+				return 0, "", err
+			}
+			return meta.Size, meta.Mime, err
+		},
+		HandleSet: func(loc *locator.ArtifactLocator, mime string, size int64, stream io.ReadCloser) error {
+			c.Logger.Info("HandleSet called", zap.Any("loc", *loc))
+			return p.SetArtifact(loc, mime, size, stream)
+		},
 	}
 }
 
-func (p *Provider) makeToolHandler() *Handler {
-	return &Handler{
-		Authenticator: p.Authenticator,
-		LocatorGenerator: func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ToolDescriptor(id), nil
+func MakeToolsHandler(c *Config, p storage.Provider) Handler[*locator.ToolLocator] {
+	return Handler[*locator.ToolLocator]{
+		Authenticator:  c.authenticator,
+		MaxPackageSize: c.MaxPackageSize,
+		Redis:          c.RedisClient,
+		HandleGet: func(loc *locator.ToolLocator, r *http.Request) (size int64, mime string, stream io.ReadCloser, err error) {
+			meta, stream, err := p.GetTool(loc)
+			if err != nil {
+				return 0, "", nil, err
+			}
+
+			return meta.Size, meta.Mime, stream, err
 		},
-		MaxPackageSize: p.MaxPackageSize,
-		Provider:       p.StorageProvider,
-		Redis:          p.Redis,
+		HandleHead: func(loc *locator.ToolLocator, r *http.Request) (size int64, mime string, err error) {
+			meta, err := p.GetToolMeta(loc)
+			if err != nil {
+				return 0, "", err
+			}
+			return meta.Size, meta.Mime, err
+		},
+		HandleSet: func(loc *locator.ToolLocator, mime string, size int64, stream io.ReadCloser) error {
+			return p.SetTool(loc, mime, size, stream)
+		},
 	}
-}
-
-func (p *Provider) MakeHandler(kind storage.Kind) *Handler {
-	if kind == storage.KindArtifact {
-		return p.makeArtifactHandler()
-	}
-
-	return p.makeToolHandler()
 }
 
 func (p *Provider) MakeMux() *chi.Mux {
-	artifactHandler := p.MakeHandler(storage.KindArtifact)
-	toolsHandler := p.MakeHandler(storage.KindTool)
-
 	r := chi.NewRouter()
 	r.Use(logging.RequestLogger(p.Logger))
 
-	r.Get("/artifact/{id}", artifactHandler.HandleGet)
-	r.Head("/artifact/{id}", artifactHandler.HandleHead)
-	r.Post("/artifact/{id}", artifactHandler.HandleSet)
+	r.Get("/artifact/{id}", p.artifactHandler.Get)
+	r.Head("/artifact/{id}", p.artifactHandler.Head)
+	r.Post("/artifact/{id}", p.artifactHandler.Set)
 
-	r.Get("/tool/{id}", toolsHandler.HandleGet)
-	r.Head("/tool/{id}", toolsHandler.HandleHead)
-	r.Post("/tool/{id}", toolsHandler.HandleSet)
+	r.Get("/tool/{id}", p.toolsHandler.Get)
+	r.Head("/tool/{id}", p.toolsHandler.Head)
+	r.Post("/tool/{id}", p.toolsHandler.Set)
 
 	return r
 }

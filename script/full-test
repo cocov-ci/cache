@@ -1,0 +1,96 @@
+#!/bin/bash
+
+set -e
+
+function finish {
+  echo "Running cleanup..."
+
+  if [ -n "$minio_id" ]; then
+    docker logs "$minio_id"
+    docker rm -f "$minio_id" || true
+  fi
+
+  if [ -n "$api_id" ]; then
+    docker logs "$api_id"
+    docker rm -f "$api_id" || true
+  fi
+
+  if [ -n "$redis_id" ]; then
+    docker rm -f "$redis_id" || true
+  fi
+
+  if [ -n "$postgres_id" ]; then
+    docker rm -f "$postgres_id" || true
+  fi
+
+  if [ -n "$network_id" ]; then
+    docker network rm "$network_id" || true
+  fi
+}
+trap finish EXIT
+
+network_id=$(docker network create "cocov-cache-full-test-network")
+echo "Created network $network_id"
+postgres_id=$(docker run --rm -d --network="$network_id" --network-alias=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres postgres:alpine)
+echo "Created postgres container $postgres_id"
+redis_id=$(docker run --rm -d --network="$network_id" -P --network-alias=redis redis:alpine)
+echo "Created redis container $redis_id"
+redis_port=$(docker inspect --format '{{ (index (index .NetworkSettings.Ports "6379/tcp") 0).HostPort }}' "$redis_id")
+echo "Redis is accessible on port $redis_port"
+minio_id=$(docker run --rm -d --network="$network_id" -P --network-alias=minio minio/minio server /data)
+echo "Created minio container $minio_id"
+minio_port=$(docker inspect --format '{{ (index (index .NetworkSettings.Ports "9000/tcp") 0).HostPort }}' "$minio_id")
+echo "Minio is available on port $minio_port"
+api_id=$(docker run --rm -d \
+  -p "0:3000/tcp" \
+  --network="$network_id" \
+  --network-alias=api \
+  -e COCOV_DATABASE_USERNAME=postgres \
+  -e COCOV_DATABASE_PASSWORD=postgres \
+  -e COCOV_DATABASE_NAME=cocov \
+  -e COCOV_DATABASE_HOST=postgres \
+  -e SECRET_KEY_BASE="$(uuidgen)" \
+  cocov/api:dev bundle exec rails s -b 0.0.0.0)
+echo "Created api container $api_id"
+api_port=$(docker inspect --format '{{ (index (index .NetworkSettings.Ports "3000/tcp") 0).HostPort }}' "$api_id")
+echo "API is accessible on port $api_port"
+
+echo "API is migrating the database..."
+docker exec "$api_id" bundle exec rails db:drop db:create db:migrate
+
+echo "API Routes are"
+docker exec "$api_id" bundle exec rails routes
+
+echo "Bootstrapping basic API resources for test..."
+docker exec -i "$api_id" bundle exec rails runner - <<-RUBY
+ActiveRecord::Base.logger.level = Logger::Severity::DEBUG
+
+repo = Repository.create!(name: "cache", default_branch: "master", github_id: 0)
+puts "Created repository: #{repo.to_json}"
+user = User.create! login: "cocov", github_id: 0, admin: true, github_token: "fake", github_scopes: "fake"
+puts "Created user: #{user.to_json}"
+token = ServiceToken.new(description: "Test token", owner_id: user.id)
+token.value = "foobarfoobarfoobar"
+token.save!
+puts "Created token: #{token.to_json}"
+RUBY
+
+export REDIS_URL="redis://localhost:$redis_port/0"
+export API_URL="http://localhost:$api_port"
+export API_TOKEN="foobarfoobarfoobar"
+export COCOV_CACHE_S3_ENDPOINT="http://localhost:$minio_port"
+
+if [[ "$1" == "--manual" ]]; then
+  echo "Infrastructure provisioned. Use the following parameters to run tests:"
+  echo "export REDIS_URL=\"redis://localhost:$redis_port/0\""
+  echo "export API_URL=\"http://localhost:$api_port\""
+  echo "export API_TOKEN=\"foobarfoobarfoobar\""
+  echo "export COCOV_CACHE_S3_ENDPOINT=\"http://localhost:$minio_port\""
+  echo
+  echo "Press any key to cleanup and exit"
+  read -n1
+  echo "Cleaning up..."
+else
+  echo "Running $1 tests..."
+  go test --tags="$1" -v ./...
+fi

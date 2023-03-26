@@ -1,7 +1,12 @@
+//go:build unit
+
 package server
 
 import (
 	"fmt"
+	"github.com/cocov-ci/cache/api"
+	"github.com/cocov-ci/cache/locator"
+	"github.com/cocov-ci/cache/redis"
 	"io"
 	"net/http"
 	"strings"
@@ -21,12 +26,12 @@ import (
 
 type MockList struct {
 	StorageProvider *mocks.MockProvider
-	Redis           *mocks.MockClient
+	Redis           *mocks.MockRedisClient
 }
 
-func MakeHandler(t *testing.T, maxPackageSize int64, auth AuthenticatorFunc, loc DescriptorFunc) (*MockList, *Handler) {
+func MakeHandler(t *testing.T, maxPackageSize int64, auth AuthenticatorFunc) (*MockList, Handler[*locator.ArtifactLocator]) {
 	ctrl := gomock.NewController(t)
-	redis := mocks.NewMockClient(ctrl)
+	redis := mocks.NewMockRedisClient(ctrl)
 	store := mocks.NewMockProvider(ctrl)
 
 	list := &MockList{
@@ -34,30 +39,25 @@ func MakeHandler(t *testing.T, maxPackageSize int64, auth AuthenticatorFunc, loc
 		Redis:           redis,
 	}
 
-	return list, &Handler{
-		Authenticator:    auth,
-		LocatorGenerator: loc,
-		MaxPackageSize:   maxPackageSize,
-		Provider:         store,
-		Redis:            redis,
-	}
-}
+	hand := MakeArtifactHandler(&Config{
+		Logger:         zap.NewNop(),
+		MaxPackageSize: maxPackageSize,
+		RedisClient:    redis,
+	}, store)
+	hand.Authenticator = auth
 
-func ResponseData(t *testing.T, resp *http.Response) []byte {
-	defer func(body io.ReadCloser) { _ = body.Close() }(resp.Body)
-	d, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	return d
+	return list, hand
 }
 
 var nopLoggerMiddleware = logging.RequestLogger(zap.NewNop())
 
 func TestHandler_HandleGet(t *testing.T) {
-	exec := func(req *http.Request, hand *Handler) *http.Response {
-		return httptest.ExecuteMiddlewareWithRequest(req, http.HandlerFunc(hand.HandleGet), nopLoggerMiddleware)
+	exec := func(req *http.Request, hand Handler[*locator.ArtifactLocator]) *http.Response {
+		return httptest.ExecuteMiddlewareWithRequest(req, http.HandlerFunc(hand.Get), nopLoggerMiddleware)
 	}
+
 	t.Run("without a Cocov-Job-ID", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, nil)
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest())
 		resp := exec(req, hand)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -67,7 +67,7 @@ func TestHandler_HandleGet(t *testing.T) {
 	t.Run("Authentication rejection", func(t *testing.T) {
 		_, hand := MakeHandler(t, 0, func(_ *http.Request) error {
 			return fmt.Errorf("nope")
-		}, nil)
+		})
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"))
 		resp := exec(req, hand)
@@ -76,7 +76,7 @@ func TestHandler_HandleGet(t *testing.T) {
 	})
 
 	t.Run("Missing ID", func(o *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, nil)
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"))
 		resp := exec(req, hand)
@@ -85,9 +85,9 @@ func TestHandler_HandleGet(t *testing.T) {
 	})
 
 	t.Run("Locator Generator failure", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return nil, fmt.Errorf("boom")
-		})
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(nil, fmt.Errorf("boom"))
+
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
 			httptest.WithURLParam("id", "hello"))
@@ -97,15 +97,14 @@ func TestHandler_HandleGet(t *testing.T) {
 	})
 
 	t.Run("Storage item not found", func(t *testing.T) {
-		mock, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ArtifactDescriptor("cache", id), nil
-		})
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(&redis.RepoIdentifier{ID: 1, Name: "bla"}, nil)
 
-		mock.Redis.EXPECT().Locking([]string{"wa2zfado7k765nyj6wtqu7axezu3abjy", "hello"}, gomock.Any(), gomock.Any()).DoAndReturn(func(_ []string, _ time.Duration, fn func() error) error {
+		mock.Redis.EXPECT().Locking("artifact:1:hello", gomock.Any(), gomock.Any()).DoAndReturn(func(_ string, _ time.Duration, fn func() error) error {
 			return fn()
 		})
 
-		mock.StorageProvider.EXPECT().Get(gomock.Any()).Return(nil, nil, storage.ErrNotExist{})
+		mock.StorageProvider.EXPECT().GetArtifact(gomock.Any()).Return(nil, nil, storage.ErrNotExist{})
 
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
@@ -116,11 +115,9 @@ func TestHandler_HandleGet(t *testing.T) {
 	})
 
 	t.Run("Locking or Storage generic failure", func(t *testing.T) {
-		mock, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ArtifactDescriptor("cache", id), nil
-		})
-
-		mock.Redis.EXPECT().Locking([]string{"wa2zfado7k765nyj6wtqu7axezu3abjy", "hello"}, gomock.Any(), gomock.Any()).Return(fmt.Errorf("boom"))
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(&redis.RepoIdentifier{ID: 1, Name: "bla"}, nil)
+		mock.Redis.EXPECT().Locking("artifact:1:hello", gomock.Any(), gomock.Any()).Return(fmt.Errorf("boom"))
 
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
@@ -131,19 +128,21 @@ func TestHandler_HandleGet(t *testing.T) {
 	})
 
 	t.Run("Success", func(t *testing.T) {
-		mock, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ArtifactDescriptor("cache", id), nil
-		})
+		mock, hand := MakeHandler(t, 0, nil)
 
-		mock.Redis.EXPECT().Locking([]string{"wa2zfado7k765nyj6wtqu7axezu3abjy", "hello"}, gomock.Any(), gomock.Any()).DoAndReturn(func(_ []string, _ time.Duration, fn func() error) error {
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(&redis.RepoIdentifier{ID: 1, Name: "bla"}, nil)
+		mock.Redis.EXPECT().Locking("artifact:1:hello", gomock.Any(), gomock.Any()).DoAndReturn(func(_ string, _ time.Duration, fn func() error) error {
 			return fn()
 		})
 
-		mock.StorageProvider.EXPECT().Get(gomock.Any()).Return(&storage.Item{
+		mock.StorageProvider.EXPECT().GetArtifact(gomock.Any()).Return(&api.GetArtifactMetaOutput{
 			CreatedAt:  time.Time{},
-			AccessedAt: time.Time{},
+			LastUsedAt: time.Time{},
 			Size:       14,
 			Mime:       "text/plain",
+			Name:       "hello",
+			ID:         1,
+			Engine:     "local",
 		}, io.NopCloser(strings.NewReader("this is a test")), nil)
 
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
@@ -158,11 +157,11 @@ func TestHandler_HandleGet(t *testing.T) {
 }
 
 func TestHandler_HandleHead(t *testing.T) {
-	exec := func(req *http.Request, hand *Handler) *http.Response {
-		return httptest.ExecuteMiddlewareWithRequest(req, http.HandlerFunc(hand.HandleHead), nopLoggerMiddleware)
+	exec := func(req *http.Request, hand Handler[*locator.ArtifactLocator]) *http.Response {
+		return httptest.ExecuteMiddlewareWithRequest(req, http.HandlerFunc(hand.Head), nopLoggerMiddleware)
 	}
 	t.Run("without a Cocov-Job-ID", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, nil)
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest())
 		resp := exec(req, hand)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -171,7 +170,7 @@ func TestHandler_HandleHead(t *testing.T) {
 	t.Run("Authentication rejection", func(t *testing.T) {
 		_, hand := MakeHandler(t, 0, func(_ *http.Request) error {
 			return fmt.Errorf("nope")
-		}, nil)
+		})
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"))
 		resp := exec(req, hand)
@@ -179,7 +178,7 @@ func TestHandler_HandleHead(t *testing.T) {
 	})
 
 	t.Run("Missing ID", func(o *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, nil)
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"))
 		resp := exec(req, hand)
@@ -187,9 +186,9 @@ func TestHandler_HandleHead(t *testing.T) {
 	})
 
 	t.Run("Locator Generator failure", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return nil, fmt.Errorf("boom")
-		})
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(nil, fmt.Errorf("boom"))
+
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
 			httptest.WithURLParam("id", "hello"))
@@ -198,15 +197,13 @@ func TestHandler_HandleHead(t *testing.T) {
 	})
 
 	t.Run("Storage item not found", func(t *testing.T) {
-		mock, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ArtifactDescriptor("cache", id), nil
-		})
-
-		mock.Redis.EXPECT().Locking([]string{"wa2zfado7k765nyj6wtqu7axezu3abjy", "hello"}, gomock.Any(), gomock.Any()).DoAndReturn(func(_ []string, _ time.Duration, fn func() error) error {
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(&redis.RepoIdentifier{ID: 1, Name: "bla"}, nil)
+		mock.Redis.EXPECT().Locking("artifact:1:hello", gomock.Any(), gomock.Any()).DoAndReturn(func(_ string, _ time.Duration, fn func() error) error {
 			return fn()
 		})
 
-		mock.StorageProvider.EXPECT().MetadataOf(gomock.Any()).Return(nil, storage.ErrNotExist{})
+		mock.StorageProvider.EXPECT().GetArtifactMeta(gomock.Any()).Return(nil, storage.ErrNotExist{})
 
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
@@ -216,11 +213,9 @@ func TestHandler_HandleHead(t *testing.T) {
 	})
 
 	t.Run("Locking or Storage generic failure", func(t *testing.T) {
-		mock, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ArtifactDescriptor("cache", id), nil
-		})
-
-		mock.Redis.EXPECT().Locking([]string{"wa2zfado7k765nyj6wtqu7axezu3abjy", "hello"}, gomock.Any(), gomock.Any()).Return(fmt.Errorf("boom"))
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(&redis.RepoIdentifier{ID: 1, Name: "bla"}, nil)
+		mock.Redis.EXPECT().Locking("artifact:1:hello", gomock.Any(), gomock.Any()).Return(fmt.Errorf("boom"))
 
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
@@ -230,19 +225,19 @@ func TestHandler_HandleHead(t *testing.T) {
 	})
 
 	t.Run("Success", func(t *testing.T) {
-		mock, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ArtifactDescriptor("cache", id), nil
-		})
-
-		mock.Redis.EXPECT().Locking([]string{"wa2zfado7k765nyj6wtqu7axezu3abjy", "hello"}, gomock.Any(), gomock.Any()).DoAndReturn(func(_ []string, _ time.Duration, fn func() error) error {
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(&redis.RepoIdentifier{ID: 1, Name: "bla"}, nil)
+		mock.Redis.EXPECT().Locking("artifact:1:hello", gomock.Any(), gomock.Any()).DoAndReturn(func(_ string, _ time.Duration, fn func() error) error {
 			return fn()
 		})
 
-		mock.StorageProvider.EXPECT().MetadataOf(gomock.Any()).Return(&storage.Item{
+		mock.StorageProvider.EXPECT().GetArtifactMeta(gomock.Any()).Return(&api.GetArtifactMetaOutput{
 			CreatedAt:  time.Time{},
-			AccessedAt: time.Time{},
+			LastUsedAt: time.Time{},
 			Size:       14,
 			Mime:       "text/plain",
+			ID:         1,
+			Name:       "test",
 		}, nil)
 
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
@@ -256,11 +251,11 @@ func TestHandler_HandleHead(t *testing.T) {
 }
 
 func TestHandler_HandleSet(t *testing.T) {
-	exec := func(req *http.Request, hand *Handler) *http.Response {
-		return httptest.ExecuteMiddlewareWithRequest(req, http.HandlerFunc(hand.HandleSet), nopLoggerMiddleware)
+	exec := func(req *http.Request, hand Handler[*locator.ArtifactLocator]) *http.Response {
+		return httptest.ExecuteMiddlewareWithRequest(req, http.HandlerFunc(hand.Set), nopLoggerMiddleware)
 	}
 	t.Run("without a Cocov-Job-ID", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, nil)
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest())
 		resp := exec(req, hand)
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
@@ -270,7 +265,7 @@ func TestHandler_HandleSet(t *testing.T) {
 	t.Run("Authentication rejection", func(t *testing.T) {
 		_, hand := MakeHandler(t, 0, func(_ *http.Request) error {
 			return fmt.Errorf("nope")
-		}, nil)
+		})
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"))
 		resp := exec(req, hand)
@@ -279,7 +274,7 @@ func TestHandler_HandleSet(t *testing.T) {
 	})
 
 	t.Run("Missing Content-Type", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, nil)
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"))
 		resp := exec(req, hand)
@@ -288,7 +283,7 @@ func TestHandler_HandleSet(t *testing.T) {
 	})
 
 	t.Run("Missing Content-Length", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, nil)
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
 			httptest.WithHeader("Content-Type", "text/plain"))
@@ -297,11 +292,24 @@ func TestHandler_HandleSet(t *testing.T) {
 		assert.Equal(t, "Missing Content-Length", string(ResponseData(t, resp)))
 	})
 
-	t.Run("Request Too Large", func(t *testing.T) {
-		_, hand := MakeHandler(t, int64(len("Hello")-1), nil, nil)
+	t.Run("Missing filename", func(t *testing.T) {
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
 			httptest.WithHeader("Content-Type", "text/plain"),
+			httptest.WithContentLength(6),
+			httptest.WithBodyString("Hello!"))
+		resp := exec(req, hand)
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		assert.Equal(t, "Missing Filename", string(ResponseData(t, resp)))
+	})
+
+	t.Run("Request Too Large", func(t *testing.T) {
+		_, hand := MakeHandler(t, int64(len("Hello")-1), nil)
+		req := httptest.PrepareRequest(httptest.EmptyRequest(),
+			httptest.WithHeader("Cocov-Job-ID", "some-id"),
+			httptest.WithHeader("Content-Type", "text/plain"),
+			httptest.WithHeader("Filename", "foo.bar"),
 			httptest.WithContentLength(6),
 			httptest.WithBodyString("Hello!"))
 		resp := exec(req, hand)
@@ -310,10 +318,11 @@ func TestHandler_HandleSet(t *testing.T) {
 	})
 
 	t.Run("Missing ID", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, nil)
+		_, hand := MakeHandler(t, 0, nil)
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
 			httptest.WithHeader("Content-Type", "text/plain"),
+			httptest.WithHeader("Filename", "foo.bar"),
 			httptest.WithContentLength(6),
 			httptest.WithBodyString("Hello!"))
 		resp := exec(req, hand)
@@ -322,12 +331,13 @@ func TestHandler_HandleSet(t *testing.T) {
 	})
 
 	t.Run("Locator failure", func(t *testing.T) {
-		_, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return nil, fmt.Errorf("boom")
-		})
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(nil, fmt.Errorf("boom"))
+
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
 			httptest.WithHeader("Content-Type", "text/plain"),
+			httptest.WithHeader("Filename", "foo.bar"),
 			httptest.WithContentLength(6),
 			httptest.WithBodyString("Hello!"),
 			httptest.WithURLParam("id", "foobar"))
@@ -337,19 +347,18 @@ func TestHandler_HandleSet(t *testing.T) {
 	})
 
 	t.Run("Write failure", func(t *testing.T) {
-		mock, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ArtifactDescriptor("cache", id), nil
-		})
-
-		mock.Redis.EXPECT().Locking([]string{"wa2zfado7k765nyj6wtqu7axezu3abjy", "foobar"}, 10*time.Minute, gomock.Any()).DoAndReturn(func(_ []string, _ time.Duration, fn func() error) error {
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(&redis.RepoIdentifier{ID: 1, Name: "bla"}, nil)
+		mock.Redis.EXPECT().Locking("artifact:1:foobar", gomock.Any(), gomock.Any()).DoAndReturn(func(_ string, _ time.Duration, fn func() error) error {
 			return fn()
 		})
 
-		mock.StorageProvider.EXPECT().Set(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(fmt.Errorf("boom"))
+		mock.StorageProvider.EXPECT().SetArtifact(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(fmt.Errorf("boom"))
 
 		req := httptest.PrepareRequest(httptest.EmptyRequest(),
 			httptest.WithHeader("Cocov-Job-ID", "some-id"),
 			httptest.WithHeader("Content-Type", "text/plain"),
+			httptest.WithHeader("Filename", "foo.bar"),
 			httptest.WithContentLength(6),
 			httptest.WithBodyString("Hello!"),
 			httptest.WithURLParam("id", "foobar"))
@@ -359,17 +368,15 @@ func TestHandler_HandleSet(t *testing.T) {
 	})
 
 	t.Run("Successful write", func(t *testing.T) {
-		mock, hand := MakeHandler(t, 0, nil, func(h *Handler, r *http.Request, id string) (storage.ObjectDescriptor, error) {
-			return storage.ArtifactDescriptor("cache", id), nil
-		})
-
-		mock.Redis.EXPECT().Locking([]string{"wa2zfado7k765nyj6wtqu7axezu3abjy", "foobar"}, 10*time.Minute, gomock.Any()).DoAndReturn(func(_ []string, _ time.Duration, fn func() error) error {
+		mock, hand := MakeHandler(t, 0, nil)
+		mock.Redis.EXPECT().RepoDataFromJID("some-id").Return(&redis.RepoIdentifier{ID: 1, Name: "bla"}, nil)
+		mock.Redis.EXPECT().Locking("artifact:1:foobar", gomock.Any(), gomock.Any()).DoAndReturn(func(_ string, _ time.Duration, fn func() error) error {
 			return fn()
 		})
 
-		mock.StorageProvider.EXPECT().Set(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Do(func(_ storage.ObjectDescriptor, cType string, len int, reader io.ReadCloser) {
+		mock.StorageProvider.EXPECT().SetArtifact(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Do(func(_ *locator.ArtifactLocator, cType string, len int64, reader io.ReadCloser) {
 			assert.Equal(t, "text/plain", cType)
-			assert.Equal(t, 6, len)
+			assert.Equal(t, int64(6), len)
 			data, err := io.ReadAll(reader)
 			require.NoError(t, err)
 			assert.Equal(t, "Hello!", string(data))
@@ -380,6 +387,7 @@ func TestHandler_HandleSet(t *testing.T) {
 			httptest.WithHeader("Content-Type", "text/plain"),
 			httptest.WithContentLength(6),
 			httptest.WithBodyString("Hello!"),
+			httptest.WithHeader("Filename", "foo.bar"),
 			httptest.WithURLParam("id", "foobar"))
 		resp := exec(req, hand)
 		assert.Equal(t, http.StatusNoContent, resp.StatusCode)

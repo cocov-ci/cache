@@ -12,4 +12,6 @@ FROM alpine
 
 COPY --from=builder /cache /bin/cache
 
+EXPOSE 5000
+
 CMD /bin/cache serve

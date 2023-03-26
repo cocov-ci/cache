@@ -4,25 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"math"
-	"net/url"
-	"os"
-	"reflect"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/cocov-ci/cache/api"
+	"github.com/cocov-ci/cache/locator"
+	"go.uber.org/zap"
+	"io"
+	"math"
+	"os"
+	"strings"
 )
 
-func NewS3(bucketName string) (Provider, error) {
+func NewS3(bucketName string, client api.Client) (Provider, error) {
 	var configs []func(*config.LoadOptions) error
 
 	// Used by the test suite
@@ -49,9 +46,11 @@ func NewS3(bucketName string) (Provider, error) {
 	}
 
 	l := s3Provider{
+		api:        client,
 		bucketName: aws.String(bucketName),
 		client:     s3Client,
 		config:     cfg,
+		log:        zap.L().With(zap.String("component", "S3Storage")),
 	}
 	return l, nil
 }
@@ -60,18 +59,20 @@ type s3Provider struct {
 	bucketName *string
 	client     *s3.Client
 	config     aws.Config
+	api        api.Client
+	log        *zap.Logger
 }
 
-func (s3Provider) prefixFor(k Kind) string {
-	if k == KindArtifact {
-		return "artifact"
-	}
-
-	return "tool"
+func (s s3Provider) artifactKey(repositoryID, artifactKey int64) string {
+	return strings.Join([]string{"artifacts", fmt.Sprintf("%d", repositoryID), fmt.Sprintf("%d", artifactKey)}, "/")
 }
 
-func (s s3Provider) keyFor(locator ObjectDescriptor) string {
-	return s.prefixFor(locator.kind()) + "/" + strings.Join(locator.PathComponents(), "/")
+func (s s3Provider) artifactGroupKey(repositoryID int64) string {
+	return strings.Join([]string{"artifacts", fmt.Sprintf("%d", repositoryID), ""}, "/")
+}
+
+func (s s3Provider) toolKey(toolID int64) string {
+	return strings.Join([]string{"tools", fmt.Sprintf("%d", toolID)}, "/")
 }
 
 func coerceAWSError(key string, err error) error {
@@ -93,197 +94,106 @@ func coerceAWSError(key string, err error) error {
 	return err
 }
 
-var typeOfTime = reflect.TypeOf(time.Time{})
-
-func applyS3Tags(tags []types.Tag, into *Item) error {
-	fieldTag := map[string]reflect.StructField{}
-	var wantedTags []string
-
-	t := reflect.TypeOf(Item{})
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		tag, ok := f.Tag.Lookup("tag")
-		if ok {
-			wantedTags = append(wantedTags, tag)
-			fieldTag[tag] = f
-		}
-	}
-
-	val := reflect.ValueOf(into)
-	val = val.Elem()
-	for _, tagName := range wantedTags {
-		field := fieldTag[tagName]
-		set := false
-		for _, tagPair := range tags {
-			if tagPair.Key == nil || tagPair.Value == nil {
-				continue
-			}
-
-			if tagPair.Key != nil && *tagPair.Key == tagName {
-
-				if field.Type.Kind() == reflect.String {
-					val.FieldByIndex(field.Index).SetString(*tagPair.Value)
-					set = true
-					break
-				} else if field.Type.Kind() == reflect.Int {
-					i, err := strconv.Atoi(*tagPair.Value)
-					if err != nil {
-						return fmt.Errorf("parsing value %s for field %s: %w", *tagPair.Value, field.Name, err)
-					}
-					val.FieldByIndex(field.Index).SetInt(int64(i))
-					set = true
-					break
-				} else if field.Type == typeOfTime {
-					t, err := time.Parse(time.RFC3339, *tagPair.Value)
-					if err != nil {
-						return fmt.Errorf("parsing value %s for field %s: %w", *tagPair.Value, field.Name, err)
-					}
-					val.FieldByIndex(field.Index).Set(reflect.ValueOf(t))
-					set = true
-					break
-				} else {
-					return fmt.Errorf("field %s contains unsupported type %s", field.Name, field.Type)
-				}
-			}
-		}
-
-		if !set {
-			return fmt.Errorf("could not obtain value for field %s (%s)", field.Name, tagName)
-		}
-	}
-
-	return nil
-}
-
-func (s s3Provider) MetadataOf(locator ObjectDescriptor) (*Item, error) {
-	key := s.keyFor(locator)
-	tags, err := s.client.GetObjectTagging(context.Background(), &s3.GetObjectTaggingInput{
-		Bucket: s.bucketName,
-		Key:    &key,
+func (s s3Provider) GetArtifactMeta(locator *locator.ArtifactLocator) (*api.GetArtifactMetaOutput, error) {
+	return s.api.GetArtifactMeta(api.GetArtifactMetaInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "s3",
 	})
-	if err != nil {
-		return nil, coerceAWSError(key, err)
-	}
-
-	i := &Item{}
-	if err = applyS3Tags(tags.TagSet, i); err != nil {
-		return nil, err
-	}
-
-	return i, nil
 }
 
-func (s s3Provider) Get(locator ObjectDescriptor) (*Item, io.ReadCloser, error) {
-	key := s.keyFor(locator)
-	meta, err := s.MetadataOf(locator)
-	if err != nil {
+func (s s3Provider) GetArtifact(locator *locator.ArtifactLocator) (*api.GetArtifactMetaOutput, io.ReadCloser, error) {
+	meta, err := s.GetArtifactMeta(locator)
+	if api.IsNotFound(err) {
+		return nil, nil, ErrNotExist{}
+	} else if err != nil {
 		return nil, nil, err
 	}
 
+	objPath := s.artifactKey(locator.RepositoryID, meta.ID)
 	obj, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: s.bucketName,
-		Key:    &key,
+		Key:    &objPath,
 	})
 	if err != nil {
-		return nil, nil, coerceAWSError(key, err)
+		s.log.Error("GetObject failed", zap.Error(err), zap.Stringp("bucket", s.bucketName), zap.String("key", objPath))
+		return nil, nil, coerceAWSError(objPath, err)
 	}
 
 	return meta, obj.Body, nil
 }
 
-func tagsFromItem(item *Item) map[string][]string {
-	vals := map[string][]string{}
-
-	t := reflect.TypeOf(item).Elem()
-	v := reflect.ValueOf(item).Elem()
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		tag, ok := f.Tag.Lookup("tag")
-		if !ok {
-			continue
-		}
-		val := v.FieldByIndex(f.Index)
-		if val.IsZero() {
-			continue
-		}
-
-		switch {
-		case f.Type.Kind() == reflect.Int:
-			vals[tag] = []string{strconv.Itoa(int(v.FieldByIndex(f.Index).Int()))}
-		case f.Type.Kind() == reflect.String:
-			vals[tag] = []string{v.FieldByIndex(f.Index).String()}
-		case f.Type == typeOfTime:
-			vals[tag] = []string{v.FieldByIndex(f.Index).Interface().(time.Time).Format(time.RFC3339)}
-		default:
-			panic(fmt.Errorf("unexpected type %s on tag %s", f.Type, tag))
-		}
-	}
-
-	return vals
-}
-
-func awsTagsFromTags(tags map[string][]string) []types.Tag {
-	res := make([]types.Tag, 0, len(tags))
-	keys := make([]string, 0, len(tags))
-	for k := range tags {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		(func(k string) {
-			res = append(res, types.Tag{Key: &k, Value: &tags[k][0]})
-		})(k)
-	}
-	return res
-}
-
-func (s s3Provider) Set(locator ObjectDescriptor, mime string, objectSize int, stream io.ReadCloser) error {
+func (s s3Provider) SetArtifact(locator *locator.ArtifactLocator, mime string, objectSize int64, stream io.ReadCloser) error {
 	defer func() { _ = stream.Close() }()
 
-	key := s.keyFor(locator)
-	item := Item{
-		CreatedAt:  time.Now().UTC(),
-		AccessedAt: time.Now().UTC(),
-		Size:       objectSize,
-		Mime:       mime,
-	}
-
-	objectTags := url.Values(tagsFromItem(&item)).Encode()
-	uploader := manager.NewUploader(s.client)
-	_, err := uploader.Upload(context.Background(), &s3.PutObjectInput{
-		Bucket:  s.bucketName,
-		Key:     &key,
-		Body:    stream,
-		Tagging: &objectTags,
+	meta, err := s.api.RegisterArtifact(api.RegisterArtifactInput{
+		RepositoryID: locator.RepositoryID,
+		Name:         locator.Name,
+		NameHash:     locator.NameHash,
+		Size:         objectSize,
+		Mime:         mime,
+		Engine:       "s3",
 	})
-
-	return err
-}
-
-func (s s3Provider) Touch(locator ObjectDescriptor) error {
-	key := s.keyFor(locator)
-	meta, err := s.MetadataOf(locator)
 	if err != nil {
+
 		return err
 	}
-	meta.AccessedAt = time.Now().UTC()
-	tags := awsTagsFromTags(tagsFromItem(meta))
 
-	_, err = s.client.PutObjectTagging(context.Background(), &s3.PutObjectTaggingInput{
-		Bucket:  s.bucketName,
-		Key:     &key,
-		Tagging: &types.Tagging{TagSet: tags},
+	deleteArgs := api.DeleteArtifactInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "s3",
+	}
+
+	objPath := s.artifactKey(locator.RepositoryID, meta.ID)
+	uploader := manager.NewUploader(s.client)
+	_, err = uploader.Upload(context.Background(), &s3.PutObjectInput{
+		Bucket: s.bucketName,
+		Key:    &objPath,
+		Body:   stream,
 	})
-	return coerceAWSError(key, err)
+
+	if err != nil {
+		s.log.Error("Upload failed", zap.Error(err), zap.Stringp("bucket", s.bucketName), zap.String("key", objPath))
+		if delErr := s.api.DeleteArtifact(deleteArgs); delErr != nil {
+			s.log.Error("Failed removing item from API", zap.Error(err))
+		}
+		return err
+	}
+
+	return nil
 }
 
-func (s s3Provider) Delete(locator ObjectDescriptor) error {
-	k := s.keyFor(locator)
-	_, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+func (s s3Provider) TouchArtifact(locator *locator.ArtifactLocator) error {
+	return s.api.TouchArtifact(api.TouchArtifactInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "s3",
+	})
+}
+
+func (s s3Provider) DeleteArtifact(locator *locator.ArtifactLocator) error {
+	meta, err := s.GetArtifactMeta(locator)
+	if _, ok := err.(ErrNotExist); err != nil && ok {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	k := s.artifactKey(locator.RepositoryID, meta.ID)
+	_, err = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: s.bucketName,
 		Key:    &k,
 	})
-	return coerceAWSError(k, err)
+	if err != nil {
+		return coerceAWSError(k, err)
+	}
+
+	return s.api.DeleteArtifact(api.DeleteArtifactInput{
+		RepositoryID: locator.RepositoryID,
+		NameHash:     locator.NameHash,
+		Engine:       "s3",
+	})
 }
 
 func (s s3Provider) listObjectsRecursive(req *s3.ListObjectsV2Input, output *s3.ListObjectsV2Output) ([]types.Object, error) {
@@ -322,8 +232,8 @@ func groupsOf[T any](size int, input []T) [][]T {
 	return groups
 }
 
-func (s s3Provider) DeleteGroup(locator ObjectDescriptor) error {
-	k := s.keyFor(locator)
+func (s s3Provider) PurgeRepository(id int64) error {
+	k := s.artifactGroupKey(id)
 	req := &s3.ListObjectsV2Input{
 		Bucket: s.bucketName,
 		Prefix: &k,
@@ -360,26 +270,99 @@ func (s s3Provider) DeleteGroup(locator ObjectDescriptor) error {
 	return nil
 }
 
-func (s s3Provider) TotalSize(kind Kind) (int64, error) {
-	prefix := s.prefixFor(kind)
-	req := &s3.ListObjectsV2Input{
+func (s s3Provider) GetToolMeta(locator *locator.ToolLocator) (*api.GetToolMetaOutput, error) {
+	return s.api.GetToolMeta(api.GetToolMetaInput{
+		NameHash: locator.NameHash,
+		Engine:   "s3",
+	})
+}
+
+func (s s3Provider) GetTool(locator *locator.ToolLocator) (*api.GetToolMetaOutput, io.ReadCloser, error) {
+	meta, err := s.GetToolMeta(locator)
+	if api.IsNotFound(err) {
+		return nil, nil, ErrNotExist{}
+	} else if err != nil {
+		return nil, nil, err
+	}
+
+	objPath := s.toolKey(meta.ID)
+	obj, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: s.bucketName,
-		Prefix: &prefix,
-	}
-	list, err := s.client.ListObjectsV2(context.Background(), req)
+		Key:    &objPath,
+	})
 	if err != nil {
-		return 0, coerceAWSError(prefix, err)
+		s.log.Error("GetObject failed", zap.Error(err), zap.Stringp("bucket", s.bucketName), zap.String("key", objPath))
+		return nil, nil, coerceAWSError(objPath, err)
 	}
 
-	objects, err := s.listObjectsRecursive(req, list)
+	return meta, obj.Body, nil
+}
+
+func (s s3Provider) SetTool(locator *locator.ToolLocator, mime string, objectSize int64, stream io.ReadCloser) error {
+	defer func() { _ = stream.Close() }()
+
+	meta, err := s.api.RegisterTool(api.RegisterToolInput{
+		Name:     locator.Name,
+		NameHash: locator.NameHash,
+		Size:     objectSize,
+		Mime:     mime,
+		Engine:   "s3",
+	})
 	if err != nil {
-		return 0, coerceAWSError(prefix, err)
+
+		return err
 	}
 
-	size := int64(0)
-	for _, v := range objects {
-		size += v.Size
+	deleteArgs := api.DeleteToolInput{
+		NameHash: locator.NameHash,
+		Engine:   "s3",
 	}
 
-	return size, nil
+	objPath := s.toolKey(meta.ID)
+	uploader := manager.NewUploader(s.client)
+	_, err = uploader.Upload(context.Background(), &s3.PutObjectInput{
+		Bucket: s.bucketName,
+		Key:    &objPath,
+		Body:   stream,
+	})
+
+	if err != nil {
+		s.log.Error("Upload failed", zap.Error(err), zap.Stringp("bucket", s.bucketName), zap.String("key", objPath))
+		if delErr := s.api.DeleteTool(deleteArgs); delErr != nil {
+			s.log.Error("Failed removing item from API", zap.Error(err))
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (s s3Provider) TouchTool(locator *locator.ToolLocator) error {
+	return s.api.TouchTool(api.TouchToolInput{
+		NameHash: locator.NameHash,
+		Engine:   "s3",
+	})
+}
+
+func (s s3Provider) DeleteTool(locator *locator.ToolLocator) error {
+	meta, err := s.GetToolMeta(locator)
+	if _, ok := err.(ErrNotExist); err != nil && ok {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	k := s.toolKey(meta.ID)
+	_, err = s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+		Bucket: s.bucketName,
+		Key:    &k,
+	})
+	if err != nil {
+		return coerceAWSError(k, err)
+	}
+
+	return s.api.DeleteTool(api.DeleteToolInput{
+		NameHash: locator.NameHash,
+		Engine:   "s3",
+	})
 }

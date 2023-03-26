@@ -1,17 +1,15 @@
+//go:build integration
+
 package server
 
 import (
 	"bytes"
 	"context"
 	"fmt"
-	"net/http"
-	"os"
-	"testing"
-	"time"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/cocov-ci/cache/api"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/heyvito/httptest-go"
@@ -19,30 +17,49 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"net/http"
+	"os"
+	"testing"
+	"time"
 
 	"github.com/cocov-ci/cache/redis"
 )
 
 func ExecTest(t *testing.T, config Config) {
-	redisURL := "redis://localhost:6379/0"
+	redisURL := os.Getenv("REDIS_URL")
+	if len(redisURL) == 0 {
+		redisURL = "redis://localhost:6379/0"
+	}
+	apiURL := os.Getenv("API_URL")
+	if len(apiURL) == 0 {
+		apiURL = "http://localhost:3000"
+	}
+	apiToken := os.Getenv("API_TOKEN")
+	apiClient := api.New(apiURL, apiToken)
+
+	err := apiClient.Ping()
+	require.NoError(t, err)
+
 	redisOpts, err := redis2.ParseURL(redisURL)
 	require.NoError(t, err)
 	realRedis := redis2.NewClient(redisOpts)
 	red, err := redis.New(redisURL)
 	require.NoError(t, err)
 
-	config.Logger = zap.NewNop()
+	log, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	config.Logger = log
 	config.RedisClient = red
 
 	makeProv := func(t *testing.T) *chi.Mux {
-		prov, err := config.MakeProvider()
+		prov, err := config.MakeProvider(apiClient)
 		require.NoError(t, err)
 		return prov.MakeMux()
 	}
 
 	makeJobID := func(t *testing.T) httptest.RequestMutator {
 		jid := uuid.NewString()
-		err := realRedis.Set(context.Background(), "cocov:cache_client:"+jid, "cache", 0).Err()
+		err := realRedis.Set(context.Background(), "cocov:cached:client:"+jid, `{"id":1,"name":"cache"}`, 0).Err()
 		require.NoError(t, err)
 		return httptest.WithHeader("Cocov-Job-ID", jid)
 	}
@@ -72,7 +89,8 @@ func ExecTest(t *testing.T, config Config) {
 			mux := makeProv(t)
 			req := httptest.PrepareRequest(makePostRequest(t, "/artifact/foobar"),
 				makeJobID(t),
-				httptest.WithHeader("Content-Type", "text/plain"))
+				httptest.WithHeader("Content-Type", "text/plain"),
+				httptest.WithHeader("Filename", "foo.bar"))
 			res := httptest.ExecuteRequest(req, mux.ServeHTTP)
 			assert.Equal(t, http.StatusNoContent, res.StatusCode)
 		})
@@ -104,7 +122,9 @@ func ExecTest(t *testing.T, config Config) {
 			mux := makeProv(t)
 			req := httptest.PrepareRequest(makePostRequest(t, "/tool/foobar"),
 				makeJobID(t),
-				httptest.WithHeader("Content-Type", "text/plain"))
+				httptest.WithHeader("Content-Type", "text/plain"),
+				httptest.WithHeader("Filename", "foo.bar"),
+			)
 			res := httptest.ExecuteRequest(req, mux.ServeHTTP)
 			assert.Equal(t, http.StatusNoContent, res.StatusCode)
 		})
@@ -145,10 +165,13 @@ func TestLocalIntegration(t *testing.T) {
 
 func TestS3Integration(t *testing.T) {
 	var env = map[string]string{
-		"AWS_ACCESS_KEY_ID":       "minioadmin",
-		"AWS_SECRET_ACCESS_KEY":   "minioadmin",
-		"AWS_REGION":              "us-east-1",
-		"COCOV_CACHE_S3_ENDPOINT": "http://localhost:9000",
+		"AWS_ACCESS_KEY_ID":     "minioadmin",
+		"AWS_SECRET_ACCESS_KEY": "minioadmin",
+		"AWS_REGION":            "us-east-1",
+	}
+
+	if os.Getenv("COCOV_CACHE_S3_ENDPOINT") == "" {
+		require.NoError(t, os.Setenv("COCOV_CACHE_S3_ENDPOINT", "http://localhost:9000"))
 	}
 
 	t.Cleanup(func() {
@@ -157,6 +180,7 @@ func TestS3Integration(t *testing.T) {
 			assert.NoError(t, err)
 		}
 	})
+
 	for k, v := range env {
 		err := os.Setenv(k, v)
 		require.NoError(t, err)

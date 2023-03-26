@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"github.com/cocov-ci/cache/api"
+	"github.com/cocov-ci/cache/housekeeping"
 	"net/http"
 	"os"
 	"os/signal"
@@ -51,7 +53,19 @@ func Serve(ctx *cli.Context) error {
 		MaxPackageSize:   ctx.Int64("max-package-size-bytes"),
 	}
 
-	p, err := conf.MakeProvider()
+	logger.Info("Initializing API client")
+	apiClient := api.New(ctx.String("api-url"), ctx.String("api-token"))
+	if err = apiClient.Ping(); err != nil {
+		logger.Info("Failed initializing API", zap.Error(err))
+		return err
+	}
+
+	logger.Info("Initializing housekeeping services")
+	jan := housekeeping.New(redisClient, apiClient)
+	go jan.Start()
+
+	logger.Info("Initializing server")
+	p, err := conf.MakeProvider(apiClient)
 	if err != nil {
 		logger.Error("Failed creating Mux from configuration", zap.Error(err))
 		return err
@@ -68,10 +82,13 @@ func Serve(ctx *cli.Context) error {
 	go func() {
 		<-signalChan
 		logger.Info("Received interrupt signal. Gracefully stopping...")
+		jan.Stop()
+		logger.Info("Stopping HTTP server...")
 		err := httpServer.Shutdown(context.Background())
 		if err != nil {
 			logger.Error("Failed requesting HTTP server shutdown", zap.Error(err))
 		}
+		logger.Info("HTTP server stopped")
 		close(shutdown)
 	}()
 
@@ -85,5 +102,6 @@ func Serve(ctx *cli.Context) error {
 	}
 	<-shutdown
 
+	logger.Info("Bye!")
 	return nil
 }

@@ -44,6 +44,8 @@ func main() {
 		&cli.StringFlag{Name: "s3-bucket-name", EnvVars: envs("CACHE_S3_BUCKET_NAME"), Required: false},
 		&cli.StringFlag{Name: "bind-address", EnvVars: envs("BIND_ADDRESS"), Required: false, Value: "0.0.0.0:5000"},
 		&cli.Int64Flag{Name: "max-package-size-bytes", EnvVars: envs("MAX_PACKAGE_SIZE_BYTES"), Required: false, Value: 0},
+		&cli.StringFlag{Name: "api-url", EnvVars: envs("API_URL"), Required: true},
+		&cli.StringFlag{Name: "api-token", EnvVars: envs("API_TOKEN"), Required: true},
 	}
 	app.Authors = []*cli.Author{
 		{Name: "Victor \"Vito\" Gama", Email: "hey@vito.io"},

@@ -14,6 +14,7 @@ const (
 	KindArtifact
 )
 
+// Deprecated: Use something else
 type Item struct {
 	CreatedAt  time.Time `json:"created_at" tag:"app.cocov.cache.item.created_at"`
 	AccessedAt time.Time `json:"accessed_at" tag:"app.cocov.cache.item.accessed_at"`
@@ -21,6 +22,7 @@ type Item struct {
 	Mime       string    `json:"mime,omitempty" tag:"app.cocov.cache.item.mime"`
 }
 
+// Deprecated: Use something else
 type ObjectDescriptor interface {
 	// PathComponents returns a list of path components making the path to the
 	// item being represented by a locator instance.

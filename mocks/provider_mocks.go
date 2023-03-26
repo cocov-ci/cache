@@ -8,7 +8,8 @@ import (
 	io "io"
 	reflect "reflect"
 
-	storage "github.com/cocov-ci/cache/storage"
+	api "github.com/cocov-ci/cache/api"
+	locator "github.com/cocov-ci/cache/locator"
 	gomock "github.com/golang/mock/gomock"
 )
 
@@ -35,104 +36,162 @@ func (m *MockProvider) EXPECT() *MockProviderMockRecorder {
 	return m.recorder
 }
 
-// Delete mocks base method.
-func (m *MockProvider) Delete(locator storage.ObjectDescriptor) error {
+// DeleteArtifact mocks base method.
+func (m *MockProvider) DeleteArtifact(locator *locator.ArtifactLocator) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Delete", locator)
+	ret := m.ctrl.Call(m, "DeleteArtifact", locator)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// Delete indicates an expected call of Delete.
-func (mr *MockProviderMockRecorder) Delete(locator interface{}) *gomock.Call {
+// DeleteArtifact indicates an expected call of DeleteArtifact.
+func (mr *MockProviderMockRecorder) DeleteArtifact(locator interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Delete", reflect.TypeOf((*MockProvider)(nil).Delete), locator)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteArtifact", reflect.TypeOf((*MockProvider)(nil).DeleteArtifact), locator)
 }
 
-// DeleteGroup mocks base method.
-func (m *MockProvider) DeleteGroup(locator storage.ObjectDescriptor) error {
+// DeleteTool mocks base method.
+func (m *MockProvider) DeleteTool(locator *locator.ToolLocator) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteGroup", locator)
+	ret := m.ctrl.Call(m, "DeleteTool", locator)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// DeleteGroup indicates an expected call of DeleteGroup.
-func (mr *MockProviderMockRecorder) DeleteGroup(locator interface{}) *gomock.Call {
+// DeleteTool indicates an expected call of DeleteTool.
+func (mr *MockProviderMockRecorder) DeleteTool(locator interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteGroup", reflect.TypeOf((*MockProvider)(nil).DeleteGroup), locator)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteTool", reflect.TypeOf((*MockProvider)(nil).DeleteTool), locator)
 }
 
-// Get mocks base method.
-func (m *MockProvider) Get(locator storage.ObjectDescriptor) (*storage.Item, io.ReadCloser, error) {
+// GetArtifact mocks base method.
+func (m *MockProvider) GetArtifact(locator *locator.ArtifactLocator) (*api.GetArtifactMetaOutput, io.ReadCloser, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Get", locator)
-	ret0, _ := ret[0].(*storage.Item)
+	ret := m.ctrl.Call(m, "GetArtifact", locator)
+	ret0, _ := ret[0].(*api.GetArtifactMetaOutput)
 	ret1, _ := ret[1].(io.ReadCloser)
 	ret2, _ := ret[2].(error)
 	return ret0, ret1, ret2
 }
 
-// Get indicates an expected call of Get.
-func (mr *MockProviderMockRecorder) Get(locator interface{}) *gomock.Call {
+// GetArtifact indicates an expected call of GetArtifact.
+func (mr *MockProviderMockRecorder) GetArtifact(locator interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockProvider)(nil).Get), locator)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetArtifact", reflect.TypeOf((*MockProvider)(nil).GetArtifact), locator)
 }
 
-// MetadataOf mocks base method.
-func (m *MockProvider) MetadataOf(locator storage.ObjectDescriptor) (*storage.Item, error) {
+// GetArtifactMeta mocks base method.
+func (m *MockProvider) GetArtifactMeta(locator *locator.ArtifactLocator) (*api.GetArtifactMetaOutput, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "MetadataOf", locator)
-	ret0, _ := ret[0].(*storage.Item)
+	ret := m.ctrl.Call(m, "GetArtifactMeta", locator)
+	ret0, _ := ret[0].(*api.GetArtifactMetaOutput)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// MetadataOf indicates an expected call of MetadataOf.
-func (mr *MockProviderMockRecorder) MetadataOf(locator interface{}) *gomock.Call {
+// GetArtifactMeta indicates an expected call of GetArtifactMeta.
+func (mr *MockProviderMockRecorder) GetArtifactMeta(locator interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MetadataOf", reflect.TypeOf((*MockProvider)(nil).MetadataOf), locator)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetArtifactMeta", reflect.TypeOf((*MockProvider)(nil).GetArtifactMeta), locator)
 }
 
-// Set mocks base method.
-func (m *MockProvider) Set(locator storage.ObjectDescriptor, mime string, objectSize int, stream io.ReadCloser) error {
+// GetTool mocks base method.
+func (m *MockProvider) GetTool(locator *locator.ToolLocator) (*api.GetToolMetaOutput, io.ReadCloser, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Set", locator, mime, objectSize, stream)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret := m.ctrl.Call(m, "GetTool", locator)
+	ret0, _ := ret[0].(*api.GetToolMetaOutput)
+	ret1, _ := ret[1].(io.ReadCloser)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
 }
 
-// Set indicates an expected call of Set.
-func (mr *MockProviderMockRecorder) Set(locator, mime, objectSize, stream interface{}) *gomock.Call {
+// GetTool indicates an expected call of GetTool.
+func (mr *MockProviderMockRecorder) GetTool(locator interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockProvider)(nil).Set), locator, mime, objectSize, stream)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetTool", reflect.TypeOf((*MockProvider)(nil).GetTool), locator)
 }
 
-// TotalSize mocks base method.
-func (m *MockProvider) TotalSize(kind storage.Kind) (int64, error) {
+// GetToolMeta mocks base method.
+func (m *MockProvider) GetToolMeta(locator *locator.ToolLocator) (*api.GetToolMetaOutput, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "TotalSize", kind)
-	ret0, _ := ret[0].(int64)
+	ret := m.ctrl.Call(m, "GetToolMeta", locator)
+	ret0, _ := ret[0].(*api.GetToolMetaOutput)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// TotalSize indicates an expected call of TotalSize.
-func (mr *MockProviderMockRecorder) TotalSize(kind interface{}) *gomock.Call {
+// GetToolMeta indicates an expected call of GetToolMeta.
+func (mr *MockProviderMockRecorder) GetToolMeta(locator interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TotalSize", reflect.TypeOf((*MockProvider)(nil).TotalSize), kind)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetToolMeta", reflect.TypeOf((*MockProvider)(nil).GetToolMeta), locator)
 }
 
-// Touch mocks base method.
-func (m *MockProvider) Touch(locator storage.ObjectDescriptor) error {
+// PurgeRepository mocks base method.
+func (m *MockProvider) PurgeRepository(id int64) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Touch", locator)
+	ret := m.ctrl.Call(m, "PurgeRepository", id)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// Touch indicates an expected call of Touch.
-func (mr *MockProviderMockRecorder) Touch(locator interface{}) *gomock.Call {
+// PurgeRepository indicates an expected call of PurgeRepository.
+func (mr *MockProviderMockRecorder) PurgeRepository(id interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Touch", reflect.TypeOf((*MockProvider)(nil).Touch), locator)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PurgeRepository", reflect.TypeOf((*MockProvider)(nil).PurgeRepository), id)
+}
+
+// SetArtifact mocks base method.
+func (m *MockProvider) SetArtifact(locator *locator.ArtifactLocator, mime string, objectSize int64, stream io.ReadCloser) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetArtifact", locator, mime, objectSize, stream)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetArtifact indicates an expected call of SetArtifact.
+func (mr *MockProviderMockRecorder) SetArtifact(locator, mime, objectSize, stream interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetArtifact", reflect.TypeOf((*MockProvider)(nil).SetArtifact), locator, mime, objectSize, stream)
+}
+
+// SetTool mocks base method.
+func (m *MockProvider) SetTool(locator *locator.ToolLocator, mime string, objectSize int64, stream io.ReadCloser) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetTool", locator, mime, objectSize, stream)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetTool indicates an expected call of SetTool.
+func (mr *MockProviderMockRecorder) SetTool(locator, mime, objectSize, stream interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetTool", reflect.TypeOf((*MockProvider)(nil).SetTool), locator, mime, objectSize, stream)
+}
+
+// TouchArtifact mocks base method.
+func (m *MockProvider) TouchArtifact(locator *locator.ArtifactLocator) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TouchArtifact", locator)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// TouchArtifact indicates an expected call of TouchArtifact.
+func (mr *MockProviderMockRecorder) TouchArtifact(locator interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TouchArtifact", reflect.TypeOf((*MockProvider)(nil).TouchArtifact), locator)
+}
+
+// TouchTool mocks base method.
+func (m *MockProvider) TouchTool(locator *locator.ToolLocator) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TouchTool", locator)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// TouchTool indicates an expected call of TouchTool.
+func (mr *MockProviderMockRecorder) TouchTool(locator interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TouchTool", reflect.TypeOf((*MockProvider)(nil).TouchTool), locator)
 }

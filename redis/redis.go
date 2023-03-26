@@ -2,6 +2,8 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/heyvito/go-leader/leader"
 	"strings"
 	"time"
 
@@ -9,9 +11,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+type RepoIdentifier struct {
+	Name string `json:"name"`
+	ID   int64  `json:"id"`
+}
+
 type Client interface {
-	RepoNameFromJID(jid string) (bool, string, error)
-	Locking(path []string, timeout time.Duration, fn func() error) error
+	RepoDataFromJID(jid string) (*RepoIdentifier, error)
+	Locking(id string, timeout time.Duration, fn func() error) error
+	MakeLeader(opts leader.Opts) (lead leader.Leader, onPromote <-chan time.Time, onDemote <-chan time.Time, onError <-chan error)
+	NextHousekeepingTask() (string, error)
 }
 
 func New(url string) (Client, error) {
@@ -33,18 +42,39 @@ type impl struct {
 	l redlock.Redlock
 }
 
-func (i impl) RepoNameFromJID(jid string) (bool, string, error) {
-	val, err := i.r.Get(context.Background(), "cocov:cache_client:"+jid).Result()
+func (i impl) NextHousekeepingTask() (string, error) {
+	v, err := i.r.BLPop(context.Background(), 2*time.Second, "cocov:cached:housekeeping_tasks").Result()
 	if err == redis.Nil {
-		return false, "", nil
+		return "", nil
 	} else if err != nil {
-		return false, "", err
+		return "", err
 	}
 
-	return true, val, nil
+	return v[0], nil
 }
 
-func (i impl) Locking(path []string, ttl time.Duration, fn func() error) error {
-	key := strings.Join(append([]string{"cocov:cache_lock"}, path...), ":")
+func (i impl) MakeLeader(opts leader.Opts) (lead leader.Leader, onPromote <-chan time.Time, onDemote <-chan time.Time, onError <-chan error) {
+	opts.Redis = i.r
+	return leader.NewLeader(opts)
+}
+
+func (i impl) RepoDataFromJID(jid string) (*RepoIdentifier, error) {
+	val, err := i.r.Get(context.Background(), "cocov:cached:client:"+jid).Result()
+	if err == redis.Nil {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	id := RepoIdentifier{}
+	if err = json.Unmarshal([]byte(val), &id); err != nil {
+		return nil, err
+	}
+
+	return &id, nil
+}
+
+func (i impl) Locking(id string, ttl time.Duration, fn func() error) error {
+	key := strings.Join([]string{"cocov:cached:cache_lock", id}, ":")
 	return i.l.Locking(key, int(ttl.Milliseconds()), fn)
 }
