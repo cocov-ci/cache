@@ -3,23 +3,13 @@ package housekeeping
 import (
 	"encoding/json"
 	"github.com/cocov-ci/cache/api"
+	"github.com/cocov-ci/cache/locator"
 	"github.com/cocov-ci/cache/redis"
+	"github.com/cocov-ci/cache/storage"
 	"github.com/heyvito/go-leader/leader"
 	"go.uber.org/zap"
 	"time"
 )
-
-type Task struct {
-	Name     string `json:"task"`
-	ID       string `json:"task_id"`
-	original []byte
-}
-
-func TaskInto[T any](task *Task) (*T, error) {
-	var v T
-	err := json.Unmarshal(task.original, &v)
-	return &v, err
-}
 
 func New(r redis.Client, apiClient api.Client) *Janitor {
 	l, promote, demote, err := r.MakeLeader(leader.Opts{
@@ -54,13 +44,58 @@ type Janitor struct {
 	running bool
 	done    chan bool
 	api     api.Client
+	storage storage.Provider
 }
 
 func (j *Janitor) performTasks() {
 	defer close(j.done)
-	for task := range j.tasks {
-		j.log.Info("Performing task", zap.String("id", task.ID))
+	for rawTask := range j.tasks {
+		switch rawTask.Name {
+		case "evict":
+			task, err := TaskInto[EvictTask](rawTask)
+			if err != nil {
+				j.log.Error("Failed decoding task", zap.String("task_id", rawTask.ID), zap.String("name", rawTask.Name), zap.ByteString("data", rawTask.original))
+				continue
+			}
+
+			j.runEvict(task)
+		case "purge":
+			task, err := TaskInto[PurgeTask](rawTask)
+			if err != nil {
+				j.log.Error("Failed decoding task", zap.String("task_id", rawTask.ID), zap.String("name", rawTask.Name), zap.ByteString("data", rawTask.original))
+				continue
+			}
+			j.runPurge(task)
+		}
+		j.log.Info("Performing task", zap.String("id", rawTask.ID))
 	}
+}
+
+func (j *Janitor) runEvict(task *EvictTask) {
+	log := j.log.With(zap.String("task_id", task.ID))
+	log.Info("Starting task")
+	for _, id := range task.Objects {
+		err := j.storage.DeleteArtifact(&locator.ArtifactLocator{
+			RepositoryID: task.Repository,
+			NameHash:     id,
+		})
+		if err != nil {
+			log.Error("Failed removing item from storage", zap.String("id", id), zap.Error(err))
+			continue
+		}
+	}
+	log.Info("Completed")
+}
+
+func (j *Janitor) runPurge(task *PurgeTask) {
+	log := j.log.With(zap.String("task_id", task.ID))
+	log.Info("Starting task")
+	err := j.storage.PurgeRepository(task.Repository)
+	if err != nil {
+		log.Error("Failed purging repository", zap.Error(err))
+		return
+	}
+	log.Info("Completed")
 }
 
 func (j *Janitor) collectTasks() {
