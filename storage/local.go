@@ -66,11 +66,16 @@ type LocalStorage struct {
 }
 
 func (l LocalStorage) GetArtifactMeta(locator *locator.ArtifactLocator) (*api.GetArtifactMetaOutput, error) {
-	return l.api.GetArtifactMeta(api.GetArtifactMetaInput{
+	res, err := l.api.GetArtifactMeta(api.GetArtifactMetaInput{
 		RepositoryID: locator.RepositoryID,
 		NameHash:     locator.NameHash,
 		Engine:       "local",
 	})
+	if api.IsNotFound(err) {
+		return nil, ErrNotExist{}
+	}
+
+	return res, err
 }
 
 func (l LocalStorage) groupPath(repoID int64) (string, error) {
@@ -223,10 +228,15 @@ func (l LocalStorage) PurgeRepository(id int64) error {
 }
 
 func (l LocalStorage) GetToolMeta(locator *locator.ToolLocator) (*api.GetToolMetaOutput, error) {
-	return l.api.GetToolMeta(api.GetToolMetaInput{
+	res, err := l.api.GetToolMeta(api.GetToolMetaInput{
 		NameHash: locator.NameHash,
 		Engine:   "local",
 	})
+	if api.IsNotFound(err) {
+		return nil, ErrNotExist{}
+	}
+
+	return res, err
 }
 
 func (l LocalStorage) GetTool(locator *locator.ToolLocator) (*api.GetToolMetaOutput, io.ReadCloser, error) {

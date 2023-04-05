@@ -118,7 +118,6 @@ func MakeArtifactHandler(c *Config, p storage.Provider) Handler[*locator.Artifac
 			return meta.Size, meta.Mime, err
 		},
 		HandleSet: func(loc *locator.ArtifactLocator, mime string, size int64, stream io.ReadCloser) error {
-			c.Logger.Info("HandleSet called", zap.Any("loc", *loc))
 			return p.SetArtifact(loc, mime, size, stream)
 		},
 	}
