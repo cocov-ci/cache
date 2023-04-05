@@ -40,11 +40,11 @@ jobs:
       - name: Push docker image
         run: docker push cocov/cache:dev
 
-#      - name: Trigger update
-#        uses: appleboy/ssh-action@v0.1.6
-#        with:
-#          host: ${{ secrets.DEPLOY_HOST }}
-#          username: ${{ secrets.DEPLOY_USERNAME }}
-#          key: ${{ secrets.DEPLOY_KEY }}
-#          port: ${{ secrets.DEPLOY_PORT }}
-#          script: cocov/update
+      - name: Trigger update
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USERNAME }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          script: cocov/update
