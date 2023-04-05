@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"github.com/cocov-ci/cache/api"
 	"github.com/cocov-ci/cache/housekeeping"
 	"net/http"
@@ -17,6 +18,23 @@ import (
 	"github.com/cocov-ci/cache/server"
 )
 
+const attempts = 10
+
+func Backoff(log *zap.Logger, operation string, fn func() error) (err error) {
+	for i := 0; i < attempts; i++ {
+		time.Sleep(time.Duration(i*4) * time.Second)
+		if err = fn(); err != nil {
+			log.Error("Backoff "+operation,
+				zap.Int("delay_secs", (i+1)*4),
+				zap.String("attempt", fmt.Sprintf("%d/%d", i+1, attempts)),
+				zap.Error(err))
+			continue
+		}
+		return nil
+	}
+	return err
+}
+
 func Serve(ctx *cli.Context) error {
 	isDevelopment := os.Getenv("COCOV_WORKER_DEV") == "true"
 	logger, err := logging.InitializeLogger(isDevelopment)
@@ -26,22 +44,17 @@ func Serve(ctx *cli.Context) error {
 	defer func() { _ = logger.Sync() }()
 
 	var redisClient redis.Client
-	for i := 0; i < 5; i++ {
+	err = Backoff(logger, "initializing Redis client", func() error {
 		redisClient, err = redis.New(ctx.String("redis-url"))
-		if err != nil {
-			logger.Error("Failed initializing Redis client", zap.Error(err))
-			delay := time.Duration(i*2) * time.Second
-			logger.Info("Retrying", zap.Duration("delay", delay))
-			time.Sleep(delay)
-		} else {
-			break
-		}
-	}
+		return err
+	})
 
 	if err != nil {
-		logger.Error("Exhausted attempts to connect to Redis.")
+		logger.Error("Gave trying to connect to Redis.")
 		return err
 	}
+
+	logger.Info("Initialized Redis client")
 
 	conf := &server.Config{
 		Logger:           logger,
@@ -53,23 +66,27 @@ func Serve(ctx *cli.Context) error {
 		MaxPackageSize:   ctx.Int64("max-package-size-bytes"),
 	}
 
-	logger.Info("Initializing API client")
 	apiClient := api.New(ctx.String("api-url"), ctx.String("api-token"))
-	if err = apiClient.Ping(); err != nil {
-		logger.Info("Failed initializing API", zap.Error(err))
+	err = Backoff(logger, "initializing API client", func() error {
+		return apiClient.Ping()
+	})
+	if err != nil {
+		logger.Error("Gave up initializing API client")
 		return err
 	}
 
-	logger.Info("Initializing housekeeping services")
+	logger.Info("Initialized API client")
+
 	jan := housekeeping.New(redisClient, apiClient)
 	go jan.Start()
+	logger.Info("Initialized housekeeping services")
 
-	logger.Info("Initializing server")
 	p, err := conf.MakeProvider(apiClient)
 	if err != nil {
 		logger.Error("Failed creating Mux from configuration", zap.Error(err))
 		return err
 	}
+	logger.Info("Pre-initialized server")
 
 	httpServer := http.Server{
 		Addr:    conf.BindAddress,
