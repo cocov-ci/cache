@@ -33,10 +33,10 @@ func main() {
 	fmt.Println("    .%=           -@:@*            ")
 
 	app := cli.NewApp()
-	app.Name = "cocov-worker"
-	app.Usage = "Executes Cocov checks on commits"
+	app.Name = "cocov-cache"
+	app.Usage = "Manages cache artifacts requests from plugins"
 	app.Version = "0.1"
-	app.DefaultCommand = "run"
+	app.DefaultCommand = "serve"
 	app.Flags = []cli.Flag{
 		&cli.StringFlag{Name: "redis-url", EnvVars: envs("REDIS_URL"), Required: true},
 		&cli.StringFlag{Name: "storage-mode", EnvVars: envs("CACHE_STORAGE_MODE"), Required: true},
