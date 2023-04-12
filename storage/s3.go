@@ -270,6 +270,44 @@ func (s s3Provider) PurgeRepository(id int64) error {
 	return nil
 }
 
+func (s s3Provider) PurgeTool() error {
+	k := "tool"
+	req := &s3.ListObjectsV2Input{
+		Bucket: s.bucketName,
+		Prefix: &k,
+	}
+	list, err := s.client.ListObjectsV2(context.Background(), req)
+	if err != nil {
+		return coerceAWSError(k, err)
+	}
+
+	objects, err := s.listObjectsRecursive(req, list)
+	if err != nil {
+		return coerceAWSError(k, err)
+	}
+
+	// May only delete 1k items per request...
+	requests := groupsOf(1000, objects)
+	for _, group := range requests {
+		keys := make([]types.ObjectIdentifier, len(group))
+		for i, o := range group {
+			keys[i].Key = o.Key
+		}
+
+		_, err = s.client.DeleteObjects(context.Background(), &s3.DeleteObjectsInput{
+			Bucket: s.bucketName,
+			Delete: &types.Delete{
+				Objects: keys,
+			},
+		})
+		if err != nil {
+			return coerceAWSError(k, err)
+		}
+	}
+
+	return nil
+}
+
 func (s s3Provider) GetToolMeta(locator *locator.ToolLocator) (*api.GetToolMetaOutput, error) {
 	return s.api.GetToolMeta(api.GetToolMetaInput{
 		NameHash: locator.NameHash,

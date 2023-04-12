@@ -19,4 +19,5 @@ type Provider interface {
 	SetTool(locator *locator.ToolLocator, mime string, objectSize int64, stream io.ReadCloser) error
 	TouchTool(locator *locator.ToolLocator) error
 	DeleteTool(locator *locator.ToolLocator) error
+	PurgeTool() error
 }

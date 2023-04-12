@@ -173,4 +173,11 @@ func TestS3(t *testing.T) {
 			return countBucketItems(t, client, bucketName)
 		})
 	})
+
+	t.Run("purge tool", func(t *testing.T) {
+		bucketName, client, provider := makeS3Client(t)
+		testToolPurge(t, provider, func(t *testing.T) int {
+			return countBucketItems(t, client, bucketName)
+		})
+	})
 }

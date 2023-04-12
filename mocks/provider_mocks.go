@@ -140,6 +140,20 @@ func (mr *MockProviderMockRecorder) PurgeRepository(id interface{}) *gomock.Call
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PurgeRepository", reflect.TypeOf((*MockProvider)(nil).PurgeRepository), id)
 }
 
+// PurgeTool mocks base method.
+func (m *MockProvider) PurgeTool() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PurgeTool")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// PurgeTool indicates an expected call of PurgeTool.
+func (mr *MockProviderMockRecorder) PurgeTool() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PurgeTool", reflect.TypeOf((*MockProvider)(nil).PurgeTool))
+}
+
 // SetArtifact mocks base method.
 func (m *MockProvider) SetArtifact(locator *locator.ArtifactLocator, mime string, objectSize int64, stream io.ReadCloser) error {
 	m.ctrl.T.Helper()

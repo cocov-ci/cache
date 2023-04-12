@@ -242,3 +242,13 @@ func testToolDelete(t *testing.T, p Provider, fsCounter func(t *testing.T) int) 
 	afterCount := fsCounter(t)
 	assert.Less(t, afterCount, beforeCount)
 }
+
+func testToolPurge(t *testing.T, p Provider, fsCounter func(t *testing.T) int) {
+	pushTool(t, p)
+
+	beforeCount := fsCounter(t)
+	err := p.PurgeTool()
+	require.NoError(t, err)
+	afterCount := fsCounter(t)
+	assert.Less(t, afterCount, beforeCount)
+}

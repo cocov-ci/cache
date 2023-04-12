@@ -26,3 +26,14 @@ type PurgeTask struct {
 	ID         string `json:"task_id,omitempty"`
 	Repository int64  `json:"repository,omitempty"`
 }
+
+type EvictToolTask struct {
+	Name    string   `json:"task,omitempty"`
+	ID      string   `json:"task_id,omitempty"`
+	Objects []string `json:"objects,omitempty"`
+}
+
+type PurgeToolTask struct {
+	Name string `json:"task,omitempty"`
+	ID   string `json:"task_id,omitempty"`
+}

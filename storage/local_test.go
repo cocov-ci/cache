@@ -105,4 +105,11 @@ func TestLocal(t *testing.T) {
 			return countFiles(t, tmpDir)
 		})
 	})
+
+	t.Run("purge tool", func(t *testing.T) {
+		tmpDir, provider := makeLocalClient(t)
+		testToolPurge(t, provider, func(t *testing.T) int {
+			return countFiles(t, tmpDir)
+		})
+	})
 }

@@ -65,6 +65,14 @@ type LocalStorage struct {
 	log          *zap.Logger
 }
 
+func (l LocalStorage) PurgeTool() error {
+	err := os.RemoveAll(l.toolPath)
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(l.toolPath, 0755)
+}
+
 func (l LocalStorage) GetArtifactMeta(locator *locator.ArtifactLocator) (*api.GetArtifactMetaOutput, error) {
 	res, err := l.api.GetArtifactMeta(api.GetArtifactMetaInput{
 		RepositoryID: locator.RepositoryID,
