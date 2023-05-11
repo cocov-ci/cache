@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/cocov-ci/cache/api"
 	"github.com/cocov-ci/cache/housekeeping"
+	"github.com/cocov-ci/cache/probes"
 	"net/http"
 	"os"
 	"os/signal"
@@ -42,6 +43,15 @@ func Serve(ctx *cli.Context) error {
 		return err
 	}
 	defer func() { _ = logger.Sync() }()
+
+	logger.Info("Initializing probes server")
+	probeSrv := probes.NewStatus(ctx.String("probes-server-bind-address"))
+	go func() {
+		if err := probeSrv.Run(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Probe server failed", zap.Error(err))
+		}
+	}()
+	logger.Info("Initialized probes server")
 
 	var redisClient redis.Client
 	err = Backoff(logger, "initializing Redis client", func() error {
@@ -99,6 +109,7 @@ func Serve(ctx *cli.Context) error {
 	go func() {
 		<-signalChan
 		logger.Info("Received interrupt signal. Gracefully stopping...")
+		probeSrv.SetReady(false)
 		jan.Stop()
 		logger.Info("Stopping HTTP server...")
 		err := httpServer.Shutdown(context.Background())
@@ -110,7 +121,7 @@ func Serve(ctx *cli.Context) error {
 	}()
 
 	logger.Info("Starting HTTP server", zap.String("bind_address", conf.BindAddress))
-
+	probeSrv.SetReady(true)
 	if err = httpServer.ListenAndServe(); err != nil {
 		<-shutdown
 		if err != http.ErrServerClosed {
