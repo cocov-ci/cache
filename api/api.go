@@ -156,7 +156,7 @@ func (i impl) TouchTool(input TouchToolInput) error {
 }
 
 func (i impl) Ping() error {
-	r, err := grequests.Get(i.baseURL+"/v1/ping", &grequests.RequestOptions{
+	r, err := grequests.Get(i.baseURL+"/system/probes/health", &grequests.RequestOptions{
 		Headers: map[string]string{
 			"Accept":        "application/json",
 			"Authorization": "bearer " + i.token,
