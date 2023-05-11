@@ -67,7 +67,7 @@ ActiveRecord::Base.logger.level = Logger::Severity::DEBUG
 
 repo = Repository.create!(name: "cache", default_branch: "master", github_id: 0)
 puts "Created repository: #{repo.to_json}"
-user = User.create! login: "cocov", github_id: 0, admin: true, github_token: "fake", github_scopes: "fake"
+user = User.create! login: "cocov", github_id: 0, admin: true, github_token: "fake"
 puts "Created user: #{user.to_json}"
 token = ServiceToken.new(description: "Test token", owner_id: user.id)
 token.value = "foobarfoobarfoobar"
