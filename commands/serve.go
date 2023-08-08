@@ -60,7 +60,7 @@ func Serve(ctx *cli.Context) error {
 	})
 
 	if err != nil {
-		logger.Error("Gave trying to connect to Redis.")
+		logger.Error("Gave up trying to connect to Redis.")
 		return err
 	}
 
@@ -87,16 +87,16 @@ func Serve(ctx *cli.Context) error {
 
 	logger.Info("Initialized API client")
 
-	jan := housekeeping.New(redisClient, apiClient)
-	go jan.Start()
-	logger.Info("Initialized housekeeping services")
-
 	p, err := conf.MakeProvider(apiClient)
 	if err != nil {
 		logger.Error("Failed creating Mux from configuration", zap.Error(err))
 		return err
 	}
 	logger.Info("Pre-initialized server")
+
+	jan := housekeeping.New(redisClient, apiClient, p.StorageProvider)
+	go jan.Start()
+	logger.Info("Initialized housekeeping services")
 
 	httpServer := http.Server{
 		Addr:    conf.BindAddress,

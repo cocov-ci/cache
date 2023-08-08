@@ -7,8 +7,8 @@ package mocks
 import (
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
 	redlock "github.com/heyvito/redlock-go"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockRedlock is a mock of Redlock interface.

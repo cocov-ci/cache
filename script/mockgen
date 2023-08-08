@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if ! which mockgen 1>&2 > /dev/null; then
-  echo "Please install mockgen: go install github.com/golang/mock/mockgen@v1.6.0"
+  echo "Please install mockgen: go install go.uber.org/mock/mockgen@latest"
   exit 1
 fi
 
@@ -14,6 +14,7 @@ function gen() {
   mockgen -package=mocks -source="$path" -mock_names "$2" > "mocks/${filename%.*}_mocks.go"
 }
 
+gen "api/api.go" "Client=MockAPIClient"
 gen "storage/provider.go" "Provider=MockProvider"
 gen "redis/redis.go" "Client=MockRedisClient"
 mockgen -package=mocks "github.com/heyvito/redlock-go" Redlock > "mocks/redlock-go_mocks.go"

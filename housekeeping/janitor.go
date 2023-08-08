@@ -8,10 +8,12 @@ import (
 	"github.com/cocov-ci/cache/storage"
 	"github.com/heyvito/go-leader/leader"
 	"go.uber.org/zap"
+	"runtime/debug"
+	"sync"
 	"time"
 )
 
-func New(r redis.Client, apiClient api.Client) *Janitor {
+func New(r redis.Client, apiClient api.Client, provider storage.Provider) *Janitor {
 	l, promote, demote, err := r.MakeLeader(leader.Opts{
 		TTL:      5 * time.Second,
 		Wait:     10 * time.Second,
@@ -20,90 +22,128 @@ func New(r redis.Client, apiClient api.Client) *Janitor {
 	})
 
 	return &Janitor{
-		api:     apiClient,
-		log:     zap.L().With(zap.String("component", "janitor")),
-		redis:   r,
-		leader:  l,
-		promote: promote,
-		demote:  demote,
-		err:     err,
-		tasks:   make(chan *Task, 10),
-		done:    make(chan bool),
+		api:            apiClient,
+		log:            zap.L().With(zap.String("component", "janitor")),
+		redis:          r,
+		leader:         l,
+		storage:        provider,
+		promote:        promote,
+		demote:         demote,
+		err:            err,
+		tasks:          make(chan *Task, 10),
+		runningMu:      &sync.Mutex{},
+		runningTasks:   &sync.WaitGroup{},
+		currentTasksMu: &sync.Mutex{},
+		currentTasks:   make(map[*Task]bool),
 	}
 }
 
 type Janitor struct {
-	redis   redis.Client
-	log     *zap.Logger
-	leader  leader.Leader
-	promote <-chan time.Time
-	demote  <-chan time.Time
-	err     <-chan error
-	tasks   chan *Task
-	leading bool
-	running bool
-	done    chan bool
-	api     api.Client
-	storage storage.Provider
+	redis     redis.Client
+	log       *zap.Logger
+	leader    leader.Leader
+	promote   <-chan time.Time
+	demote    <-chan time.Time
+	err       <-chan error
+	tasks     chan *Task
+	leading   bool
+	running   bool
+	runningMu *sync.Mutex
+	api       api.Client
+	storage   storage.Provider
+
+	runningTasks   *sync.WaitGroup
+	currentTasksMu *sync.Mutex
+	currentTasks   map[*Task]bool
+
+	// Used for testing
+	countJobs     bool
+	jobsPerformed []string
+}
+
+func (j *Janitor) keepJobCount() {
+	j.countJobs = true
+}
+
+// Débora
+func (j *Janitor) incrementJobCount() {
+	if !j.countJobs {
+		return
+	}
+	j.jobsPerformed = append(j.jobsPerformed, string(debug.Stack()))
+}
+
+func (j *Janitor) performTask(rawTask *Task) {
+	defer func() {
+		j.runningTasks.Done()
+		j.currentTasksMu.Lock()
+		defer j.currentTasksMu.Unlock()
+		delete(j.currentTasks, rawTask)
+	}()
+
+	j.log.Info("Performing task", zap.String("id", rawTask.ID))
+	switch rawTask.Name {
+	case "evict-artifact":
+		task, err := TaskInto[EvictTask](rawTask)
+		if err != nil {
+			j.log.Error(
+				"Failed decoding task",
+				zap.String("task_id", rawTask.ID),
+				zap.String("name", rawTask.Name),
+				zap.ByteString("data", rawTask.original),
+				zap.Error(err),
+			)
+		}
+
+		j.runEvictArtifact(task)
+		j.incrementJobCount()
+	case "evict-tool":
+		task, err := TaskInto[EvictToolTask](rawTask)
+		if err != nil {
+			j.log.Error(
+				"Failed decoding task",
+				zap.String("task_id", rawTask.ID),
+				zap.String("name", rawTask.Name),
+				zap.ByteString("data", rawTask.original),
+			)
+		}
+
+		j.runEvictTool(task)
+		j.incrementJobCount()
+	case "purge-repository":
+		task, err := TaskInto[PurgeTask](rawTask)
+		if err != nil {
+			j.log.Error(
+				"Failed decoding task",
+				zap.String("task_id", rawTask.ID),
+				zap.String("name", rawTask.Name),
+				zap.ByteString("data", rawTask.original),
+			)
+		}
+		j.runPurgeRepository(task)
+		j.incrementJobCount()
+
+	case "purge-tool":
+		task, err := TaskInto[PurgeToolTask](rawTask)
+		if err != nil {
+			j.log.Error(
+				"Failed decoding task",
+				zap.String("task_id", rawTask.ID),
+				zap.String("name", rawTask.Name),
+				zap.ByteString("data", rawTask.original),
+			)
+		}
+		j.runPurgeTool(task)
+		j.incrementJobCount()
+	}
 }
 
 func (j *Janitor) performTasks() {
-	defer close(j.done)
 	for rawTask := range j.tasks {
-		j.log.Info("Performing task", zap.String("id", rawTask.ID))
-		switch rawTask.Name {
-		case "evict-artifact":
-			task, err := TaskInto[EvictTask](rawTask)
-			if err != nil {
-				j.log.Error(
-					"Failed decoding task",
-					zap.String("task_id", rawTask.ID),
-					zap.String("name", rawTask.Name),
-					zap.ByteString("data", rawTask.original),
-				)
-				continue
-			}
-
-			j.runEvictArtifact(task)
-		case "evict-tool":
-			task, err := TaskInto[EvictToolTask](rawTask)
-			if err != nil {
-				j.log.Error(
-					"Failed decoding task",
-					zap.String("task_id", rawTask.ID),
-					zap.String("name", rawTask.Name),
-					zap.ByteString("data", rawTask.original),
-				)
-				continue
-			}
-
-			j.runEvictTool(task)
-		case "purge-repository":
-			task, err := TaskInto[PurgeTask](rawTask)
-			if err != nil {
-				j.log.Error(
-					"Failed decoding task",
-					zap.String("task_id", rawTask.ID),
-					zap.String("name", rawTask.Name),
-					zap.ByteString("data", rawTask.original),
-				)
-				continue
-			}
-			j.runPurgeRepository(task)
-
-		case "purge-tool":
-			task, err := TaskInto[PurgeToolTask](rawTask)
-			if err != nil {
-				j.log.Error(
-					"Failed decoding task",
-					zap.String("task_id", rawTask.ID),
-					zap.String("name", rawTask.Name),
-					zap.ByteString("data", rawTask.original),
-				)
-				continue
-			}
-			j.runPurgeTool(task)
-		}
+		j.currentTasksMu.Lock()
+		j.currentTasks[rawTask] = true
+		j.currentTasksMu.Unlock()
+		j.performTask(rawTask)
 	}
 }
 
@@ -171,12 +211,31 @@ func (j *Janitor) collectTasks() {
 		if v == "" {
 			continue
 		}
+
+		j.log.Info("Obtained task", zap.String("task", v))
 		var t Task
-		err = json.Unmarshal([]byte(v), &t)
+		var rawTask = []byte(v)
+		err = json.Unmarshal(rawTask, &t)
 		if err != nil {
 			j.log.Error("Failed unmarshalling base task", zap.Error(err), zap.String("data", v))
 			continue
 		}
+		t.original = rawTask
+
+		j.runningMu.Lock()
+		if !j.running {
+			j.log.Info("Obtained task during shutdown. Will requeue.")
+			// At this point, the tasks channel have already been closed.
+			// Requeue the job, so the next leader can take it. Also, stop
+			// running.
+			if err = j.redis.RequeueHousekeepingTask(v); err != nil {
+				j.log.Error("Failed requeueing task", zap.Error(err), zap.Any("task", t))
+			}
+			j.runningMu.Unlock()
+			break
+		}
+		j.runningMu.Unlock()
+		j.runningTasks.Add(1)
 		j.tasks <- &t
 	}
 }
@@ -196,9 +255,12 @@ func (j *Janitor) Start() {
 		case <-j.demote:
 			j.log.Info("Stopped leading")
 			j.leading = false
+			j.runningMu.Lock()
 			if !j.running {
+				j.runningMu.Unlock()
 				return
 			}
+			j.runningMu.Unlock()
 
 		case err := <-j.err:
 			j.log.Error("Leading mechanism reported error", zap.Error(err))
@@ -211,7 +273,9 @@ func (j *Janitor) Stop() {
 		return
 	}
 	j.log.Info("Stopping...")
+	j.runningMu.Lock()
 	j.running = false
+	j.runningMu.Unlock()
 
 	resigned := false
 	for i := 0; i < 10; i++ {
@@ -227,7 +291,15 @@ func (j *Janitor) Stop() {
 		j.log.Warn("Failed to resign for 10 seconds. Attempting to forcibly interrupt task handling. Cluster may run without a leader until next election.")
 		j.leading = false
 	}
+
+	j.currentTasksMu.Lock()
+	var allTasks []*Task
+	for t := range j.currentTasks {
+		allTasks = append(allTasks, t)
+	}
+	j.currentTasksMu.Unlock()
+
+	j.log.Info("Waiting for tasks to be finished...", zap.Any("tasks", allTasks))
+	j.runningTasks.Wait()
 	close(j.tasks)
-	j.log.Info("Waiting for tasks to be finished (if any)...")
-	<-j.done
 }
