@@ -10,7 +10,7 @@ import (
 
 	api "github.com/cocov-ci/cache/api"
 	locator "github.com/cocov-ci/cache/locator"
-	gomock "github.com/golang/mock/gomock"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockProvider is a mock of Provider interface.

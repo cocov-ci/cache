@@ -50,7 +50,7 @@ func (i impl) NextHousekeepingTask() (string, error) {
 		return "", err
 	}
 
-	return v[0], nil
+	return v[1], nil
 }
 
 func (i impl) MakeLeader(opts leader.Opts) (lead leader.Leader, onPromote <-chan time.Time, onDemote <-chan time.Time, onError <-chan error) {

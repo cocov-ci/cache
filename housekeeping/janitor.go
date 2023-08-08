@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func New(r redis.Client, apiClient api.Client) *Janitor {
+func New(r redis.Client, apiClient api.Client, provider storage.Provider) *Janitor {
 	l, promote, demote, err := r.MakeLeader(leader.Opts{
 		TTL:      5 * time.Second,
 		Wait:     10 * time.Second,
@@ -24,6 +24,7 @@ func New(r redis.Client, apiClient api.Client) *Janitor {
 		log:     zap.L().With(zap.String("component", "janitor")),
 		redis:   r,
 		leader:  l,
+		storage: provider,
 		promote: promote,
 		demote:  demote,
 		err:     err,
@@ -60,6 +61,7 @@ func (j *Janitor) performTasks() {
 					zap.String("task_id", rawTask.ID),
 					zap.String("name", rawTask.Name),
 					zap.ByteString("data", rawTask.original),
+					zap.Error(err),
 				)
 				continue
 			}
@@ -172,11 +174,13 @@ func (j *Janitor) collectTasks() {
 			continue
 		}
 		var t Task
-		err = json.Unmarshal([]byte(v), &t)
+		var rawTask = []byte(v)
+		err = json.Unmarshal(rawTask, &t)
 		if err != nil {
 			j.log.Error("Failed unmarshalling base task", zap.Error(err), zap.String("data", v))
 			continue
 		}
+		t.original = rawTask
 		j.tasks <- &t
 	}
 }
