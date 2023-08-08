@@ -9,8 +9,8 @@ import (
 	time "time"
 
 	redis "github.com/cocov-ci/cache/redis"
-	gomock "github.com/golang/mock/gomock"
 	leader "github.com/heyvito/go-leader/leader"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockRedisClient is a mock of Client interface.

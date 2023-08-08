@@ -13,11 +13,13 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/heyvito/go-leader v0.1.0
 	github.com/heyvito/httptest-go v0.0.2
+	github.com/heyvito/locking-pool v0.1.0
 	github.com/heyvito/redlock-go v0.0.2
 	github.com/levigross/grequests v0.0.0-20221222020224-9eee758d18d5
-	github.com/redis/go-redis/v9 v9.0.2
-	github.com/stretchr/testify v1.8.2
-	github.com/urfave/cli/v2 v2.24.4
+	github.com/redis/go-redis/v9 v9.0.5
+	github.com/stretchr/testify v1.8.4
+	github.com/urfave/cli/v2 v2.25.7
+	go.uber.org/mock v0.2.0
 	go.uber.org/zap v1.24.0
 )
 
@@ -50,3 +52,5 @@ require (
 	golang.org/x/net v0.0.0-20210405180319-a5a99cb37ef4 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/heyvito/mochaccino => ../../mochaccino
